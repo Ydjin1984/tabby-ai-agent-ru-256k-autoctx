@@ -1,0 +1,377 @@
+<div
+  class="ai-panel-container"
+  (click)="$event.stopPropagation()"
+  (mousedown)="onPanelMouseDown($event)"
+  (keydown)="handleContainerKeydown($event)"
+>
+  <div class="header">
+    <div class="title">
+      <i class="fas fa-robot me-2"></i>
+      <span>AI Агент</span>
+      <span class="plugin-version" title="Версия плагина">v3</span>
+    </div>
+    <div class="header-actions ms-auto">
+      <button
+        class="btn btn-link btn-sm"
+        type="button"
+        [disabled]="isCompacting"
+        (click)="compactContext(false)"
+        title="Сжать контекст диалога в краткое резюме"
+      >
+        <i class="fas fa-compress-alt me-1"></i>
+        <span *ngIf="!isCompacting">Сжать</span>
+        <span *ngIf="isCompacting">Сжатие…</span>
+      </button>
+      <button class="btn btn-link btn-sm" type="button" (click)="clearChat()">
+        Очистить <span class="kbd-hint">{{ getHotkeyLabel('clear-ai-agent-chat') }}</span>
+      </button>
+      <button class="btn btn-link btn-sm" type="button" (click)="closed.emit()">
+        Закрыть
+      </button>
+    </div>
+  </div>
+
+  <div class="context-bar">
+    <span
+      class="endpoint-pill"
+      [class.ready]="endpointConfigured"
+      [class.missing]="!endpointConfigured"
+    >
+      {{ endpointConfigured ? "Готово" : "Не задано" }}
+    </span>
+    <span class="endpoint-text text-muted">
+      {{ endpointConfigured ? (config.store.aiAgent.model || config.store.aiAgent.llmEndpoint) : "Задайте модель в настройках плагина." }}
+    </span>
+    <div
+      class="context-meter"
+      *ngIf="contextTokensUsed > 0 || messages.length > 0"
+      [class]="'meter-' + contextUsageClass"
+      [title]="'Занятость контекста: ' + contextTokensDisplay + ' из ' + contextWindowDisplay + ' токенов (включая системный промпт и схемы инструментов). ' + (contextUsageExact ? 'Значение от сервера.' : 'Оценка локально.')"
+    >
+      <div class="progress context-progress">
+        <div
+          class="progress-bar"
+          role="progressbar"
+          [style.width.%]="contextUsagePercentClamped"
+          [attr.aria-valuenow]="contextUsagePercentClamped"
+          [attr.aria-valuemin]="0"
+          [attr.aria-valuemax]="100"
+        ></div>
+      </div>
+      <span class="context-label">
+        <ng-container *ngIf="!contextUsageExact">~</ng-container
+        >{{ contextTokensDisplay }} / {{ contextWindowDisplay }}
+        ({{ contextUsagePercentRounded }}%)
+        <i
+          *ngIf="isCompacting"
+          class="fas fa-spinner fa-spin context-spinner"
+        ></i>
+      </span>
+    </div>
+  </div>
+
+  <div class="messages-wrap">
+    <div #messagesContainer class="messages" (scroll)="onMessagesScroll()">
+    <div class="empty-state" *ngIf="messages.length === 0">
+      <i class="fas fa-comments empty-state-icon"></i>
+      <div class="empty-state-title">Спросите агента</div>
+      <ul class="empty-state-examples">
+        <li>Объясни последнюю команду</li>
+        <li>Проверь логи nginx</li>
+        <li>Найди все изображения в этой папке</li>
+        <li>Сколько работает сервер?</li>
+        <li>Обнови системные пакеты</li>
+      </ul>
+    </div>
+
+    <div
+      class="message"
+      *ngFor="let message of messages; trackBy: trackMessage"
+      [class.user]="message.role === 'user'"
+      [class.assistant]="message.role === 'assistant'"
+      [class.reasoning]="message.role === 'reasoning'"
+      [class.collapsed]="message.collapsed"
+      [class.tool]="message.role === 'tool'"
+      [class.system]="message.role === 'system'"
+    >
+      <div class="message-header">
+        <button
+          *ngIf="message.role === 'reasoning'"
+          class="reasoning-toggle"
+          type="button"
+          (click)="toggleMessageCollapsed(message.id)"
+          [attr.aria-expanded]="!message.collapsed"
+        >
+          <i
+            class="fas"
+            [class.fa-chevron-right]="message.collapsed"
+            [class.fa-chevron-down]="!message.collapsed"
+          ></i>
+          <span>Размышления</span>
+        </button>
+        <span class="role" *ngIf="message.role !== 'reasoning'">
+          <ng-container [ngSwitch]="message.role">
+            <span *ngSwitchCase="'user'">Вы</span>
+            <span *ngSwitchCase="'assistant'">Ассистент</span>
+            <span *ngSwitchCase="'tool'">Результат инструмента</span>
+            <span *ngSwitchCase="'system'">Система</span>
+          </ng-container>
+        </span>
+        <span class="stream-state text-muted" *ngIf="message.streaming">
+          идёт генерация
+        </span>
+      </div>
+
+      <div class="message-content" *ngIf="!message.collapsed">
+        <div
+          class="markdown-content"
+          *ngIf="message.role === 'assistant' || message.role === 'user'; else nonMarkdownText"
+          [innerHTML]="message.content | aiMarkdown"
+        ></div>
+        <div class="message-attachments" *ngIf="message.images?.length">
+          <img
+            *ngFor="let img of message.images"
+            [src]="img"
+            class="message-image"
+            alt="attachment"
+          />
+        </div>
+        <ng-template #nonMarkdownText>
+          <ng-container
+            *ngIf="message.role === 'reasoning'; else toolOrSystemText"
+          >
+            <pre class="reasoning-content">{{ message.content }}</pre>
+          </ng-container>
+        </ng-template>
+        <ng-template #toolOrSystemText>
+          <pre
+            class="tool-result-content"
+            *ngIf="message.role === 'tool'; else systemText"
+            >{{ message.content }}</pre
+          >
+        </ng-template>
+        <ng-template #systemText>
+          <div class="system-notice-content">{{ message.content }}</div>
+        </ng-template>
+
+        <div
+          class="tool-calls"
+          *ngIf="message.role === 'assistant' && getToolCalls(message.toolCallIds).length"
+        >
+          <div
+            class="tool-call-card"
+            *ngFor="let toolCall of getToolCalls(message.toolCallIds); trackBy: trackToolCall"
+            [class.awaiting-approval]="toolCall.status === 'awaiting_approval'"
+            [class.awaiting-user-input]="toolCall.status === 'awaiting_user_input'"
+            [class.awaiting-terminal-input]="toolCall.status === 'awaiting_terminal_input'"
+            [class.executing]="toolCall.status === 'executing'"
+            [class.blocked]="toolCall.status === 'blocked'"
+            [class.completed]="toolCall.status === 'completed'"
+            [class.error]="toolCall.status === 'error'"
+          >
+            <div class="tool-call-header">
+              <span class="tool-name">{{ toolCall.name }}</span>
+              <span class="tool-status">{{ toolStatusLabel(toolCall.status) }}</span>
+            </div>
+            <pre class="tool-command" *ngIf="toolCall.command"
+              >{{ toolCall.command }}</pre
+            >
+            <div
+              class="tool-call-meta"
+              *ngIf="toolCall.riskLevel || toolCall.estimatedRunTime || toolCall.explanation"
+            >
+              <div
+                class="risk-badge"
+                [attr.data-risk]="toolCall.riskLevel || 'unknown'"
+              >
+                Риск: {{ toolCall.riskLevel || "неизвестно" }}
+              </div>
+              <div class="tool-explanation" *ngIf="toolCall.estimatedRunTime">
+                Примерное время: {{ toolCall.estimatedRunTime }}
+              </div>
+              <div class="tool-explanation" *ngIf="toolCall.explanation">
+                {{ toolCall.explanation }}
+              </div>
+            </div>
+            <div
+              class="tool-call-actions"
+              *ngIf="toolCall.status === 'awaiting_approval'"
+            >
+              <button
+                class="btn btn-sm btn-primary"
+                type="button"
+                (click)="approveToolCall(toolCall.id)"
+              >
+                <span class="btn-text">Одобрить</span>
+                <small class="kbd-hint">{{ getHotkeyLabel('approve-ai-agent-command') }}</small>
+              </button>
+              <button
+                class="btn btn-sm btn-outline-secondary"
+                type="button"
+                (click)="declineToolCall(toolCall.id)"
+              >
+                <span class="btn-text">Отклонить</span>
+                <small class="kbd-hint">{{ getHotkeyLabel('decline-ai-agent-command') }}</small>
+              </button>
+            </div>
+            <div
+              class="ask-user-card"
+              *ngIf="toolCall.status === 'awaiting_user_input' && toolCall.question"
+            >
+              <div class="ask-user-question">{{ toolCall.question }}</div>
+              <div
+                class="ask-user-choices"
+                *ngIf="toolCall.choices.length; else askUserFreeText"
+              >
+                <button
+                  class="btn btn-sm btn-outline-primary"
+                  type="button"
+                  *ngFor="let choice of toolCall.choices"
+                  (click)="submitUserAnswer(toolCall.id, choice)"
+                >
+                  {{ choice }}
+                </button>
+              </div>
+              <ng-template #askUserFreeText>
+                <div class="ask-user-input-row">
+                  <input
+                    #askUserInput
+                    class="form-control form-control-sm"
+                    type="text"
+                    [ngModel]="getPendingUserAnswer(toolCall.id)"
+                    (ngModelChange)="updatePendingUserAnswer(toolCall.id, $event)"
+                    (keydown.enter)="submitUserAnswer(toolCall.id)"
+                    placeholder="Введите ответ"
+                  />
+                  <button
+                    class="btn btn-sm btn-primary"
+                    type="button"
+                    [disabled]="!getPendingUserAnswer(toolCall.id).trim()"
+                    (click)="submitUserAnswer(toolCall.id)"
+                  >
+                    Отправить
+                  </button>
+                </div>
+              </ng-template>
+            </div>
+            <div class="tool-result-accordion" *ngIf="hideTerminalOutput && toolCall.output && toolCall.name !== 'ask_user'; else plainToolOutput">
+              <button class="tool-result-toggle" type="button" (click)="toggleToolCallOutputCollapsed(toolCall.id)">
+                <i class="fas" [class.fa-chevron-right]="toolCall.outputCollapsed" [class.fa-chevron-down]="!toolCall.outputCollapsed"></i>
+                <span>Вывод терминала ({{ toolCall.output.split('\n').length }} строк)</span>
+              </button>
+              <pre *ngIf="!toolCall.outputCollapsed">{{ toolCall.output }}</pre>
+            </div>
+            <ng-template #plainToolOutput>
+              <pre *ngIf="toolCall.output">{{ toolCall.output }}</pre>
+            </ng-template>
+            <div class="tool-error text-danger" *ngIf="toolCall.errorMessage">
+              {{ toolCall.errorMessage }}
+            </div>
+          </div>
+        </div>
+
+        <div class="streaming-indicator" *ngIf="message.streaming">
+          <span class="dot"></span>
+          <span class="dot"></span>
+          <span class="dot"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+    <button
+      class="scroll-bottom-btn"
+      type="button"
+      *ngIf="!canAutoScroll && messages.length"
+      (click)="scrollToBottomSmooth()"
+      title="Прокрутить вниз и снова включить автопрокрутку"
+    >
+      <i class="fas fa-arrow-down"></i>
+      <span class="missed-badge" *ngIf="missedMessagesCount > 0">{{
+        missedMessagesCount
+      }}</span>
+    </button>
+  </div>
+
+  <div class="composer-error" *ngIf="lastError">{{ lastError }}</div>
+
+  <div class="input-area">
+    <div class="attachments-row" *ngIf="attachments.length">
+      <div class="attachment-chip" *ngFor="let a of attachments">
+        <img
+          *ngIf="a.kind === 'image' && a.dataUrl"
+          [src]="a.dataUrl"
+          class="attachment-thumb"
+          alt=""
+        />
+        <i *ngIf="a.kind === 'text'" class="fas fa-file-alt attachment-icon"></i>
+        <span class="attachment-name">{{ a.name }}</span>
+        <button
+          class="attachment-remove"
+          type="button"
+          (click)="removeAttachment(a.id)"
+          title="Убрать вложение"
+        >
+          ×
+        </button>
+      </div>
+    </div>
+
+    <div class="composer-row">
+      <button
+        class="btn btn-link btn-sm attach-btn"
+        type="button"
+        (click)="openFilePicker()"
+        [disabled]="sending"
+        title="Прикрепить файл или изображение"
+      >
+        <i class="fas fa-paperclip"></i>
+      </button>
+      <textarea
+        #promptInput
+        class="form-control ai-input"
+        [(ngModel)]="draftPrompt"
+        [disabled]="!endpointConfigured"
+        rows="1"
+        placeholder="Введите запрос. Shift+Enter — новая строка."
+        (input)="autoResizeTextarea()"
+        (paste)="handleComposerPaste($event)"
+        (keydown)="handleComposerKeydown($event)"
+      ></textarea>
+      <button
+        *ngIf="sending; else sendButton"
+        class="btn btn-outline-danger send-btn"
+        type="button"
+        (click)="stopCurrentResponse()"
+      >
+        Стоп
+        <small class="kbd-hint">{{ getHotkeyLabel('stop-ai-agent-response') }}</small>
+      </button>
+      <span
+        *ngIf="hasExecutingShellCommand"
+        class="force-read-hint kbd-hint"
+        title="Прочитать текущий вывод терминала немедленно"
+      >
+        Прочитать вывод сейчас: {{ getHotkeyLabel('force-read-terminal') }}
+      </span>
+    <ng-template #sendButton>
+      <button
+        class="btn btn-primary send-btn"
+        type="button"
+        [disabled]="!canSend"
+        (click)="sendMessage()"
+      >
+        Отправить
+      </button>
+    </ng-template>
+    </div>
+  </div>
+  <input
+    #fileInput
+    type="file"
+    multiple
+    class="hidden-file-input"
+    accept="image/*,.txt,.md,.markdown,.json,.js,.mjs,.cjs,.ts,.tsx,.jsx,.py,.go,.rs,.c,.h,.cpp,.hpp,.cc,.java,.kt,.sh,.bash,.zsh,.bat,.cmd,.ps1,.yaml,.yml,.toml,.ini,.cfg,.conf,.log,.csv,.tsv,.html,.htm,.css,.scss,.less,.sql,.xml,.vue,.svelte,.rb,.php,.pl,.swift,.r,.dart,.lua,.diff,.patch,.env,.properties,.gitignore"
+    (change)="onFilesSelected($event)"
+  />
+</div>

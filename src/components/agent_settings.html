@@ -1,0 +1,656 @@
+<div class="settings-page">
+  <section class="settings-hero">
+    <div>
+      <div class="eyebrow">Tabby AI Агент</div>
+      <h3>Настройки AI Agent</h3>
+      <p>
+        Подключите панель к любому OpenAI-совместимому chat API, настройте
+        параметры запросов под провайдера и выберите, как должно работать
+        подтверждение shell-команд.
+      </p>
+    </div>
+    <div class="status-card">
+      <span
+        class="status-dot"
+        [class.ready]="config.store.aiAgent.llmEndpoint"
+      ></span>
+      <div>
+        <div class="status-label">
+          {{
+            config.store.aiAgent.llmEndpoint
+              ? "Endpoint задан"
+              : "Требуется endpoint"
+          }}
+        </div>
+        <div class="status-detail">
+          {{
+            config.store.aiAgent.llmEndpoint
+              ? config.store.aiAgent.llmEndpoint
+              : "Добавьте base URL перед открытием панели AI Agent."
+          }}
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="settings-card">
+    <div class="setting-copy">
+      <div class="setting-kicker">Провайдер</div>
+      <div class="title">Модель</div>
+      <div class="description">
+        Выберите готовую модель — base URL, id модели и размер контекстного
+        окна подставятся автоматически. «Своя модель» оставляет поля Base URL и
+        Model редактируемыми вручную.
+      </div>
+    </div>
+
+    <div class="input-wrap">
+      <label class="input-label" for="ai-agent-model-preset">Модель</label>
+      <select
+        id="ai-agent-model-preset"
+        class="form-control"
+        [ngModel]="modelPreset"
+        (ngModelChange)="saveModelPreset($event)"
+      >
+        <option *ngFor="let preset of modelPresets" [value]="preset.id">
+          {{ preset.label }}
+        </option>
+        <option [value]="customPresetId">Своя модель (вручную)</option>
+      </select>
+      <div class="help-panel" *ngIf="selectedPreset as preset">
+        <div class="help-title">Что подставится</div>
+        <div>{{ preset.hint }}</div>
+      </div>
+      <div
+        class="validation-error"
+        *ngIf="selectedPreset?.requiresToken && !apiToken"
+      >
+        Для этой модели нужен API-ключ — заполните «Bearer token» ниже.
+      </div>
+    </div>
+  </section>
+
+  <section class="settings-card">
+    <div class="setting-copy">
+      <div class="setting-kicker">Размышления</div>
+      <div class="title">Уровень размышления</div>
+      <div class="description">
+        Насколько глубоко модель думает перед ответом. Для DeepSeek уходит
+        <code>reasoning_effort</code>, для локального мозга Kibborg —
+        <code>chat_template_kwargs.enable_thinking</code> и
+        <code>thinking_budget_tokens</code>.
+      </div>
+    </div>
+
+    <div class="input-wrap">
+      <label class="input-label" for="ai-agent-reasoning-effort">Уровень</label>
+      <select
+        id="ai-agent-reasoning-effort"
+        class="form-control"
+        [ngModel]="reasoningEffort"
+        (ngModelChange)="saveReasoningEffort($event)"
+      >
+        <option *ngFor="let effort of reasoningEfforts" [value]="effort.id">
+          {{ effort.label }}
+        </option>
+      </select>
+      <div class="help-panel">
+        <div class="help-title">В запрос уйдёт</div>
+        <div>{{ reasoningHint }}</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="settings-card">
+    <div class="setting-copy">
+      <div class="setting-kicker">Подключение</div>
+      <div class="title">LLM endpoint</div>
+      <div class="description">
+        Введите base URL вашего OpenAI-совместимого API. Плагин сам добавляет
+        путь <code>/v1/chat/completions</code> к стриминговым запросам, поэтому
+        не указывайте его здесь.
+      </div>
+    </div>
+
+    <div class="input-wrap">
+      <label class="input-label" for="ai-agent-endpoint">Base URL</label>
+      <input
+        id="ai-agent-endpoint"
+        class="form-control"
+        type="url"
+        placeholder="http://127.0.0.1:4000"
+        [(ngModel)]="config.store.aiAgent.llmEndpoint"
+        (ngModelChange)="saveLLMEndpoint($event)"
+        (blur)="checkLLMEndpoint()"
+      />
+      <div class="hint-grid">
+        <div>
+          <span class="hint-label">Правильно</span>
+          <code>http://127.0.0.1:4000</code>
+        </div>
+        <div>
+          <span class="hint-label">Неправильно</span>
+          <code>http://127.0.0.1:4000/v1/chat/completions</code>
+        </div>
+      </div>
+      <div
+        class="checkpoint-status"
+        [class.checking]="endpointCheckpointStatus === 'checking'"
+        [class.valid]="endpointCheckpointStatus === 'valid'"
+        [class.invalid]="endpointCheckpointStatus === 'invalid'"
+        *ngIf="endpointCheckpointMessage"
+      >
+        {{ endpointCheckpointMessage }}
+      </div>
+    </div>
+  </section>
+
+  <section class="settings-card">
+    <div class="setting-copy">
+      <div class="setting-kicker">Аутентификация</div>
+      <div class="title">API-токен</div>
+      <div class="description">
+        Требуется для коммерческих OpenAI-совместимых провайдеров с
+        bearer-аутентификацией. Для локальных endpoint'ов без токена оставьте
+        пустым.
+      </div>
+    </div>
+
+    <div class="input-wrap">
+      <label class="input-label" for="ai-agent-api-token">Bearer token</label>
+      <input
+        id="ai-agent-api-token"
+        class="form-control"
+        type="password"
+        placeholder="sk-..."
+        autocomplete="off"
+        [ngModel]="apiToken"
+        (ngModelChange)="saveApiToken($event)"
+      />
+      <div class="help-panel">
+        <div class="help-title">Как отправляется</div>
+        <div>
+          Если задан, плагин добавляет заголовок
+          <code>Authorization: Bearer &lt;token&gt;</code> к checkpoint-,
+          warmup- и chat-completion запросам.
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="settings-card">
+    <div class="setting-copy">
+      <div class="setting-kicker">Провайдер</div>
+      <div class="title">Имя модели</div>
+      <div class="description">
+        Идентификатор модели, отправляемый с каждым запросом. Коммерческие
+        провайдеры обычно требуют реальное имя модели вместо
+        <code>default</code>.
+      </div>
+    </div>
+
+    <div class="input-wrap">
+      <label class="input-label" for="ai-agent-model">Модель</label>
+      <input
+        id="ai-agent-model"
+        class="form-control"
+        type="text"
+        placeholder="gpt-4.1-mini"
+        [ngModel]="model"
+        (ngModelChange)="saveModel($event)"
+      />
+      <div class="help-panel">
+        <div class="help-title">Примеры</div>
+        <div>
+          Используйте точный идентификатор модели провайдера, например
+          <code>gpt-4.1</code>, <code>gpt-4.1-mini</code> или слаг маршрутизации
+          вашего шлюза.
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="settings-card">
+    <div class="setting-copy">
+      <div class="setting-kicker">Безопасность</div>
+      <div class="title">Подтверждение команд</div>
+      <div class="description">
+        Ассистент может предлагать shell-команды с уровнем риска и пояснением.
+        Эта опция пропускает подтверждение только для команд с риском
+        <code>low</code>; команды среднего и высокого риска всё равно требуют
+        ручного одобрения.
+      </div>
+    </div>
+
+    <div class="input-wrap">
+      <label class="input-label" for="ai-agent-approve-max-risk">
+        Автоодобрение команд
+      </label>
+      <select
+        id="ai-agent-approve-max-risk"
+        class="form-control"
+        [ngModel]="autoApproveMaxRisk"
+        (ngModelChange)="saveAutoApproveMaxRisk($event)"
+      >
+        <option *ngFor="let option of autoApproveOptions" [value]="option.id">
+          {{ option.label }}
+        </option>
+      </select>
+      <div class="help-panel">
+        <div class="help-title">Как работает</div>
+        <div>
+          Команды выполняются без подтверждения до выбранного уровня риска.
+          Опасные команды (форматирование диска, рекурсивное удаление, реестр,
+          firewall, shutdown) всегда требуют явного подтверждения, независимо от
+          настройки.
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="settings-card">
+    <div class="setting-copy">
+      <div class="setting-kicker">Память агента</div>
+      <div class="title">Накопление опыта</div>
+      <div class="description">
+        Агент запоминает, какие команды сработали в вашем окружении, и подставляет
+        удачные решения перед следующими задачами. Память привязана к ОС, оболочке и
+        runtime, поэтому решения для Windows/PowerShell не попадут в Linux/bash.
+      </div>
+    </div>
+
+    <div class="input-wrap">
+      <label class="toggle-card">
+        <input
+          type="checkbox"
+          [ngModel]="memoryEnabled"
+          (ngModelChange)="saveMemoryEnabled($event)"
+        />
+        <span class="toggle-copy">
+          <span class="toggle-title">Включить память агента</span>
+          <span class="toggle-description">
+            Хранит эпизоды, процедуры и уроки в
+            <code>~/.tabby-ai-agent/memory.json</code>. Отключение останавливает
+            запись и поиск, не удаляя файл.
+          </span>
+        </span>
+      </label>
+    </div>
+
+    <div class="input-wrap">
+      <label class="input-label" for="ai-agent-memory-limit">
+        Сколько воспоминаний подставлять:
+        <strong>{{ memoryRetrievalLimit }}</strong>
+      </label>
+      <input
+        id="ai-agent-memory-limit"
+        class="form-range"
+        type="range"
+        min="1"
+        max="20"
+        step="1"
+        [ngModel]="memoryRetrievalLimit"
+        (ngModelChange)="saveMemoryRetrievalLimit($event)"
+      />
+      <div class="range-labels">
+        <span>1</span>
+        <span>20</span>
+      </div>
+    </div>
+
+    <div class="input-wrap">
+      <label class="input-label" for="ai-agent-memory-embedding-provider">
+        Embeddings для поиска памяти
+      </label>
+      <select
+        id="ai-agent-memory-embedding-provider"
+        class="form-control"
+        [ngModel]="memoryEmbeddingProvider"
+        (ngModelChange)="saveMemoryEmbeddingProvider($event)"
+      >
+        <option value="auto">Авто: Kibborg_Embed_v1 (8082) + офлайн-фоллбэк</option>
+        <option value="openai">Только OpenAI-совместимый /v1/embeddings</option>
+        <option value="hashed">Hashed (офлайн, без модели)</option>
+      </select>
+      <div class="help-panel">
+        <div class="help-title">Почему не LLM endpoint</div>
+        <div>
+          Шлюз чата Kibborg (8083) на <code>/v1/embeddings</code> отвечает
+          <code>501 Not Implemented</code>, поэтому адрес эмбеддингов задаётся
+          отдельно (порт 8082). Если сервер недоступен, «Авто» переходит на
+          офлайн-векторы и возвращается к модели, когда она снова отвечает.
+        </div>
+      </div>
+    </div>
+
+    <div class="input-wrap" *ngIf="memoryEmbeddingProvider !== 'hashed'">
+      <label class="input-label" for="ai-agent-memory-embedding-model">
+        Модель эмбеддингов
+      </label>
+      <input
+        id="ai-agent-memory-embedding-model"
+        class="form-control"
+        type="text"
+        placeholder="Kibborg_Embed_v1"
+        [ngModel]="memoryEmbeddingModel"
+        (ngModelChange)="saveMemoryEmbeddingModel($event)"
+      />
+      <label class="input-label" for="ai-agent-memory-embedding-endpoint">
+        Endpoint эмбеддингов
+      </label>
+      <input
+        id="ai-agent-memory-embedding-endpoint"
+        class="form-control"
+        type="url"
+        placeholder="http://127.0.0.1:8082"
+        [ngModel]="memoryEmbeddingEndpoint"
+        (ngModelChange)="saveMemoryEmbeddingEndpoint($event)"
+      />
+      <div class="help-panel">
+        <div class="help-title">Автоматическая переиндексация</div>
+        <div>
+          При смене модели старые векторы несовместимы — плагин помечает их и
+          переиндексирует память через новый провайдер.
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="settings-card">
+    <div class="setting-copy">
+      <div class="setting-kicker">Расположение</div>
+      <div class="title">Положение панели</div>
+      <div class="description">
+        Выберите, где панель AI Agent появляется внутри вкладки терминала.
+      </div>
+    </div>
+
+    <div class="input-wrap">
+      <label class="input-label">Положение</label>
+      <div class="position-radio-group">
+        <label class="position-radio">
+          <input
+            type="radio"
+            name="panelPosition"
+            value="left"
+            [checked]="panelPosition === 'left'"
+            (change)="savePanelPosition('left')"
+          />
+          <i class="fas fa-arrow-left"></i>
+          <span>Слева</span>
+        </label>
+        <label class="position-radio">
+          <input
+            type="radio"
+            name="panelPosition"
+            value="right"
+            [checked]="panelPosition === 'right'"
+            (change)="savePanelPosition('right')"
+          />
+          <i class="fas fa-arrow-right"></i>
+          <span>Справа</span>
+        </label>
+        <label class="position-radio">
+          <input
+            type="radio"
+            name="panelPosition"
+            value="top"
+            [checked]="panelPosition === 'top'"
+            (change)="savePanelPosition('top')"
+          />
+          <i class="fas fa-arrow-up"></i>
+          <span>Сверху</span>
+        </label>
+        <label class="position-radio">
+          <input
+            type="radio"
+            name="panelPosition"
+            value="bottom"
+            [checked]="panelPosition === 'bottom'"
+            (change)="savePanelPosition('bottom')"
+          />
+          <i class="fas fa-arrow-down"></i>
+          <span>Снизу</span>
+        </label>
+      </div>
+    </div>
+
+    <div class="input-wrap">
+      <label class="input-label" for="ai-agent-panel-size">
+        Размер панели: <strong>{{ panelSizePercent }}%</strong>
+      </label>
+      <input
+        id="ai-agent-panel-size"
+        class="form-range"
+        type="range"
+        min="10"
+        max="90"
+        step="5"
+        [ngModel]="panelSizePercent"
+        (ngModelChange)="savePanelSizePercent($event)"
+      />
+      <div class="range-labels">
+        <span>10%</span>
+        <span>90%</span>
+      </div>
+    </div>
+
+    <div class="input-wrap">
+      <label class="toggle-card">
+        <input
+          type="checkbox"
+          [ngModel]="config.store.aiAgent.hideTerminalOutput"
+          (ngModelChange)="saveHideTerminalOutput($event)"
+        />
+        <span class="toggle-copy">
+          <span class="toggle-title">Сворачивать вывод терминала в спойлер</span>
+          <span class="toggle-description">
+            Результаты инструментов с содержимым терминала будут свёрнуты в аккордеон — нажмите, чтобы развернуть.
+          </span>
+        </span>
+      </label>
+    </div>
+  </section>
+
+  <section class="settings-card">
+    <div class="setting-copy">
+      <div class="setting-kicker">Промпты</div>
+      <div class="title">Дополнительный системный промпт</div>
+      <div class="description">
+        Необязательные инструкции, добавляемые после встроенного системного
+        промпта для каждой новой сессии AI.
+      </div>
+    </div>
+
+    <div class="input-wrap">
+      <label class="input-label" for="ai-agent-system-prompt"
+        >Дополнительные инструкции</label
+      >
+      <textarea
+        id="ai-agent-system-prompt"
+        class="form-control json-textarea"
+        rows="6"
+        spellcheck="false"
+        placeholder="Отвечай кратко. Спрашивай перед запуском пакетных менеджеров."
+        [ngModel]="additionalSystemPrompt"
+        (ngModelChange)="saveAdditionalSystemPrompt($event)"
+      ></textarea>
+      <div class="help-panel">
+        <div class="help-title">Как используется</div>
+        <div>
+          Этот текст добавляется после встроенного системного промпта плагина,
+          чтобы ваши инструкции уточняли поведение, не заменяя базовые правила
+          использования инструментов.
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="settings-card">
+    <div class="setting-copy">
+      <div class="setting-kicker">Тюнинг модели</div>
+      <div class="title">Дополнительные параметры запроса</div>
+      <div class="description">
+        Необязательный JSON, объединяемый с каждым стриминговым chat-completion
+        запросом. Полезно для LiteLLM, llama.cpp, vLLM и других провайдеров с
+        дополнительными настройками сэмплинга, размышления или шаблона.
+      </div>
+    </div>
+
+    <div class="input-wrap">
+      <label class="input-label" for="ai-agent-request-parameters"
+        >JSON-объект</label
+      >
+      <textarea
+        id="ai-agent-request-parameters"
+        class="form-control json-textarea"
+        rows="8"
+        spellcheck="false"
+        placeholder='{
+  "chat_template_kwargs": { "enable_thinking": true },
+  "thinking_budget_tokens": 100,
+  "temperature": 1.0,
+  "top_p": 0.95,
+  "top_k": 64
+}'
+        [ngModel]="additionalRequestParametersText"
+        (ngModelChange)="saveAdditionalRequestParametersText($event)"
+      ></textarea>
+      <div class="help-panel">
+        <div class="help-title">Что сюда писать?</div>
+        <div>
+          Используйте строгий JSON с кавычками вокруг ключей. Оставьте пустым,
+          чтобы отправлять только дефолты плагина. Частые ключи:
+          <code>temperature</code>, <code>top_p</code>, <code>top_k</code>,
+          <code>thinking_budget_tokens</code> и
+          <code>chat_template_kwargs</code>.
+        </div>
+      </div>
+      <div class="validation-error" *ngIf="additionalRequestParametersError">
+        {{ additionalRequestParametersError }}
+      </div>
+    </div>
+  </section>
+
+  <section class="settings-card memory-inspector">
+    <div class="setting-copy">
+      <div class="setting-kicker">Память агента</div>
+      <div class="title">Memory Inspector</div>
+      <div class="description">
+        Просмотр, поиск и управление накопленным опытом. Здесь видно, почему
+        агент предлагает конкретное решение, и можно отключить, понизить или
+        удалить вредную память.
+      </div>
+    </div>
+
+    <div class="input-wrap">
+      <div class="memory-metrics">
+        <div><span>Записей</span><strong>{{ memoryTotal }}</strong></div>
+        <div><span>1-я попытка (FASR)</span><strong>{{ memoryFirstAttemptRate }}</strong></div>
+        <div><span>Попадание памяти</span><strong>{{ memoryHitRateDisplay }}</strong></div>
+        <div><span>Ср. попыток</span><strong>{{ memoryAvgAttemptsDisplay }}</strong></div>
+        <div><span>Плохая память</span><strong>{{ memoryBadRateDisplay }}</strong></div>
+      </div>
+
+      <div class="memory-filters">
+        <input
+          class="form-control"
+          type="search"
+          placeholder="Поиск по памяти..."
+          [ngModel]="memorySearch"
+          (ngModelChange)="onMemorySearchChange($event)"
+        />
+        <select
+          class="form-control"
+          [ngModel]="memoryFilterType"
+          (ngModelChange)="onMemoryFilterTypeChange($event)"
+        >
+          <option *ngFor="let option of memoryTypeOptions" [value]="option.id">
+            {{ option.label }}
+          </option>
+        </select>
+        <select
+          class="form-control"
+          [ngModel]="memoryFilterStatus"
+          (ngModelChange)="onMemoryFilterStatusChange($event)"
+        >
+          <option *ngFor="let option of memoryStatusOptions" [value]="option.id">
+            {{ option.label }}
+          </option>
+        </select>
+      </div>
+
+      <div class="memory-actions">
+        <button type="button" class="btn btn-secondary btn-sm" (click)="refreshMemoryInspector()">
+          Обновить
+        </button>
+        <button type="button" class="btn btn-secondary btn-sm" (click)="reindexMemory()">
+          Переиндексировать
+        </button>
+        <button type="button" class="btn btn-danger btn-sm" (click)="forgetAllMemory()">
+          Очистить всё
+        </button>
+      </div>
+
+      <div class="memory-message" *ngIf="memoryInspectorMessage">
+        {{ memoryInspectorMessage }}
+      </div>
+
+      <div class="memory-empty" *ngIf="!memoryItems.length">Память пуста.</div>
+
+      <div
+        class="memory-item"
+        *ngFor="let item of memoryItems; trackBy: trackMemoryItem"
+        [class.memory-item-disabled]="item.disabled"
+        [class.memory-item-pinned]="item.pinned"
+      >
+        <div class="memory-item-header" (click)="toggleMemoryItem(item.id)">
+          <span class="memory-badge" [attr.data-type]="item.type">{{ item.typeLabel }}</span>
+          <span class="memory-status" [attr.data-status]="item.status">{{ item.status }}</span>
+          <span class="memory-title">{{ item.text }}</span>
+          <span class="memory-chevron">{{ item.expanded ? "▾" : "▸" }}</span>
+        </div>
+        <div class="memory-item-body" *ngIf="item.expanded">
+          <div class="memory-line" *ngIf="item.solution">
+            <b>Решение:</b> <code>{{ item.solution }}</code>
+          </div>
+          <div class="memory-line" *ngIf="item.environment">
+            <b>Окружение:</b> {{ item.environment }}
+          </div>
+          <div class="memory-line">
+            <b>Успех:</b> {{ item.successCount }}/{{ item.successCount + item.failureCount }}
+            · <b>уверенность:</b> {{ item.confidence | number: "1.2-2" }} ·
+            <b>использований:</b> {{ item.useCount }}
+          </div>
+          <div class="memory-line memory-warning" *ngIf="item.conflict">
+            Конфликтующее решение — есть альтернатива.
+          </div>
+          <div class="memory-line memory-warning" *ngIf="item.supersededBy">
+            Заменено более сильным решением.
+          </div>
+          <div class="memory-line memory-provenance">
+            session: {{ item.sessionId || "—" }} · создано:
+            {{ formatMemoryDate(item.createdAt) }}
+          </div>
+          <div class="memory-item-actions">
+            <button type="button" class="btn btn-sm btn-secondary" (click)="promoteMemory(item.id)">
+              Повысить
+            </button>
+            <button type="button" class="btn btn-sm btn-secondary" (click)="demoteMemory(item.id)">
+              Понизить
+            </button>
+            <button type="button" class="btn btn-sm btn-secondary" (click)="toggleMemoryPinned(item)">
+              {{ item.pinned ? "Открепить" : "Закрепить" }}
+            </button>
+            <button type="button" class="btn btn-sm btn-secondary" (click)="toggleMemoryDisabled(item)">
+              {{ item.disabled ? "Включить" : "Отключить" }}
+            </button>
+            <button type="button" class="btn btn-sm btn-danger" (click)="forgetMemory(item.id)">
+              Забыть
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+</div>

@@ -1,0 +1,8 @@
+node_modules/
+dist/
+build/
+.npm-cache/
+.test-out/
+# Непубликуемые локальные артефакты: черновые наброски и собранные архивы.
+drafts/
+*.tgz

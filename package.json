@@ -1,0 +1,81 @@
+{
+  "name": "tabby-ai-agent",
+  "version": "1.0.11-local",
+  "description": "A Tabby terminal plugin that adds an AI assistant side panel to terminal tabs, with chat, terminal context sharing, and tools for reviewing and running terminal commands. The command approval mode is configurable in settings, and the panel shows each command, its risk level, and an explanation before execution. It can connect to cloud models or self-hosted OpenAI-compatible endpoints, which is the preferred option for users who want to keep terminal data on their own infrastructure.",
+  "keywords": [
+    "tabby-plugin"
+  ],
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "webpack --progress --color",
+    "watch": "webpack --progress --color --watch",
+    "test": "tsc -p tsconfig.test.json && node .test-out/tests/llm_endpoint.test.js && node .test-out/tests/model_presets.test.js && node .test-out/tests/request_defaults.test.js && node .test-out/tests/memory.test.js"
+  },
+  "type": "commonjs",
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist"
+  ],
+  "author": "",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jvit/tabby-ai-agent.git"
+  },
+  "bugs": {
+    "url": "https://github.com/jvit/tabby-ai-agent/issues"
+  },
+  "homepage": "https://github.com/jvit/tabby-ai-agent#readme",
+  "devDependencies": {
+    "@angular/animations": "^15.2.10",
+    "@angular/common": "^15.2.10",
+    "@angular/compiler": "^15.2.10",
+    "@angular/compiler-cli": "^15.2.10",
+    "@angular/core": "^15.2.10",
+    "@angular/forms": "^15.2.10",
+    "@angular/platform-browser": "^15.2.10",
+    "@babel/core": "^7.24.0",
+    "@ng-bootstrap/ng-bootstrap": "^14.2.0",
+    "@ngtools/webpack": "^15.2.10",
+    "@tabby-gang/to-string-loader": "^1.1.7-beta.2",
+    "@types/node": "^20.11.0",
+    "@typescript-eslint/eslint-plugin": "^7.0.0",
+    "@typescript-eslint/parser": "^7.0.0",
+    "ajv": "^8.12.0",
+    "babel-loader": "^9.1.3",
+    "bootstrap": "^5.3.0",
+    "css-loader": "^6.10.0",
+    "eslint": "^8.57.0",
+    "eslint-import-resolver-typescript": "^4.4.4",
+    "eslint-plugin-import": "^2.29.1",
+    "lint-staged": "^15.2.0",
+    "rxjs": "^7.8.1",
+    "sass": "^1.71.0",
+    "sass-loader": "^14.1.0",
+    "source-map-loader": "^5.0.0",
+    "style-loader": "^3.3.4",
+    "tabby-core": "npm:tabby-core@*",
+    "tabby-settings": "npm:tabby-settings@*",
+    "tabby-terminal": "npm:tabby-terminal@*",
+    "typescript": "~4.9.5",
+    "webpack": "^5.90.0",
+    "webpack-cli": "^5.1.4"
+  },
+  "dependencies": {
+    "marked": "^12.0.0"
+  },
+  "peerDependencies": {
+    "@angular/animations": "^15",
+    "@angular/common": "^15",
+    "@angular/core": "^15",
+    "@angular/forms": "^15",
+    "@angular/platform-browser": "^15",
+    "@ng-bootstrap/ng-bootstrap": "^14",
+    "rxjs": "^7",
+    "tabby-core": "*",
+    "tabby-settings": "*",
+    "tabby-terminal": "*"
+  }
+}
