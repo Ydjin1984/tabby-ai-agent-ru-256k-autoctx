@@ -318,7 +318,8 @@ code {
 
   .memory-filters {
     display: grid;
-    grid-template-columns: 1fr 160px 160px;
+    // Фиксированные 160px в узком окне настроек давали горизонтальную прокрутку.
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
     gap: 0.5rem;
     margin-bottom: 0.5rem;
   }

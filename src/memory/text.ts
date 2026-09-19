@@ -82,7 +82,10 @@ export function normalizeWhitespace(text: string): string {
  */
 export function normalizeCommand(command: string): string {
   let value = (command ?? "").trim();
-  value = value.replace(/^[^\s]*[#$>%]\s+/, "");
+  // Промпт оболочки снимаем вместе с пробелами: прежний шаблон `[^\s]*[#$>%]`
+  // не пропускал пробел и оставлял "PS C:\\Users\\x> pip install a" как есть —
+  // инструментом команды считался `ps`, и вся атрибуция памяти ломалась.
+  value = value.replace(/^.{0,120}?[#$>%]\s+/, "");
   value = value.replace(/\s+/g, " ");
   return value;
 }

@@ -114,6 +114,9 @@ export class LLMChatSession {
    */
   lastReportedPromptTokens: number | null = null;
 
+  /** Оценка токенов блока памяти, вставленного в последний запрос. */
+  private lastMemoryContextTokens = 0;
+
   constructor(
     baseUrl: string,
     systemPrompt: string,
@@ -228,6 +231,11 @@ export class LLMChatSession {
       this.memory!.observeUserMessage(options.userMessage),
     );
     const memoryContext = await this.buildMemoryContext(options.userMessage);
+    // Блок памяти вставляется в запрос отдельно от истории, поэтому раньше он не
+    // учитывался ни в метре контекста, ни в пороге автокомпакции.
+    this.lastMemoryContextTokens = memoryContext
+      ? Math.ceil(String(memoryContext).length / 3)
+      : 0;
 
     while (true) {
       this.throwIfAborted(options.signal);
@@ -256,12 +264,21 @@ export class LLMChatSession {
       const requestedToolCalls: Record<number, ToolCallAccumulator> = {};
       let finishReason: "tool_calls" | "stop" | null = null;
       let lastStdoutWasReasoning = false;
+      let sseBuffer = "";
       while (true) {
         this.throwIfAborted(options.signal);
         const { done, value } = await reader.read();
-        if (done) break;
-        const chunk = decoder.decode(value, { stream: true });
-        const lines = chunk.split("\n").filter((l) => l.startsWith("data: "));
+        if (done) {
+          sseBuffer += decoder.decode();
+        } else {
+          sseBuffer += decoder.decode(value, { stream: true });
+        }
+        // Сетевой чанк может разрезать SSE-фрейм внутри JSON, поэтому незавершённая
+        // строка остаётся в буфере до следующего чанка: раньше обрезанный фрейм
+        // молча терялся вместе с именем инструмента (Unknown tool requested: unknown).
+        const bufferedLines = sseBuffer.split("\n");
+        sseBuffer = done ? "" : (bufferedLines.pop() ?? "");
+        const lines = bufferedLines.filter((l) => l.startsWith("data: "));
         for (const line of lines) {
           const data = line.slice(6);
           if (data === "[DONE]") continue;
@@ -289,13 +306,27 @@ export class LLMChatSession {
             if (!delta) continue;
             if (delta.tool_calls) {
               for (const tc of delta.tool_calls) {
-                const i = tc.index;
+                const i: any =
+                  tc.index !== undefined && tc.index !== null
+                    ? tc.index
+                    : `call:${tc.id ?? Object.keys(requestedToolCalls).length}`;
                 if (!requestedToolCalls[i]) {
                   requestedToolCalls[i] = {
                     id: tc.id,
                     type: "function",
                     function: { name: tc.function?.name ?? "", arguments: "" },
                   };
+                } else {
+                  // id и name провайдер вправе прислать в любом чанке, а не только в
+                  // первом: без этого одна потерянная граница фрейма оставляла вызов
+                  // без имени и он падал как «Unknown tool requested: unknown».
+                  if (!requestedToolCalls[i].id && tc.id) {
+                    requestedToolCalls[i].id = tc.id;
+                  }
+                  const deltaName = tc.function?.name;
+                  if (!requestedToolCalls[i].function.name && deltaName) {
+                    requestedToolCalls[i].function.name = deltaName;
+                  }
                 }
                 if (tc.function?.arguments) {
                   requestedToolCalls[i].function.arguments +=
@@ -331,6 +362,7 @@ export class LLMChatSession {
             // skip malformed chunks
           }
         }
+        if (done) break;
       }
 
       if (fullReasoning)
@@ -342,19 +374,83 @@ export class LLMChatSession {
         // conversation valid – an assistant message with tool_calls MUST be
         // followed by exactly one tool message per tool_call.
         const historyBeforeToolCalls = this.history.length;
+        const assistantToolCalls = Object.values(requestedToolCalls);
+        if (!assistantToolCalls.length) {
+          // Поток обещал вызовы инструментов, но не принёс ни одного: пустой
+          // assistant.tool_calls провайдер отвергает так же, как висячий.
+          throw new Error(
+            "Модель завершила ответ с finish_reason=tool_calls, но не передала ни одного вызова инструмента. Повторите запрос.",
+          );
+        }
+        // id обязателен в assistant-сообщении и должен совпадать с парным
+        // tool-сообщением: провайдер мог прислать его в потерянном фрейме.
+        for (const tc of assistantToolCalls) {
+          if (!tc.id) {
+            tc.id = crypto.randomUUID();
+          }
+        }
         await pushHistory({
           role: "assistant",
           content: fullContent.trim() ? fullContent : null,
-          tool_calls: Object.values(requestedToolCalls),
+          tool_calls: assistantToolCalls,
         });
         try {
-          for (const tc of Object.values(requestedToolCalls)) {
+          for (const tc of assistantToolCalls) {
           if (!this.tools) continue;
-          const name = tc.function.name || "unknown";
-          const args = JSON.parse(tc.function.arguments);
-          const toolCallId = tc.id || crypto.randomUUID();
-          const tool = this.tools.find((t) => t.name() === name);
-          if (!tool) throw new Error(`Unknown tool requested: ${name}`);
+          const toolCallId = tc.id;
+          const requestedName = tc.function?.name || "";
+          const tool = requestedName
+            ? this.tools.find((t) => t.name() === requestedName)
+            : undefined;
+          const rawArgs =
+            tc.function && typeof tc.function.arguments === "string"
+              ? tc.function.arguments
+              : "";
+          let args: any = {};
+          let argsParseFailed = false;
+          if (rawArgs.trim()) {
+            try {
+              args = JSON.parse(rawArgs);
+            } catch {
+              argsParseFailed = true;
+              args = { _raw: rawArgs };
+            }
+          }
+          if (!tool || argsParseFailed) {
+            // Неизвестное имя или оборванные аргументы — ошибка вызова, а не приговор
+            // сессии: отвечаем модели tool-сообщением, чтобы история осталась валидной
+            // и агент мог переиграть вызов.
+            const reason = argsParseFailed
+              ? `не удалось разобрать аргументы вызова (поток ответа оборвался): ${rawArgs.slice(0, 300)}`
+              : requestedName
+                ? `инструмент "${requestedName}" недоступен`
+                : "модель запросила инструмент без имени (поток ответа оборвался)";
+            const rejectedOutput = `Вызов инструмента отклонён: ${reason}. Повтори вызов корректно.`;
+            console.warn(`Отклонён вызов инструмента: ${reason}`);
+            await this.observeMemory(() =>
+              this.memory!.observeToolResult({
+                toolName: requestedName || "unknown",
+                args,
+                output: rejectedOutput,
+                ok: false,
+                errorMessage: reason,
+              }),
+            );
+            await pushHistory({
+              role: "tool",
+              content: rejectedOutput,
+              tool_call_id: toolCallId,
+            });
+            if (options.onToolResult) {
+              await options.onToolResult(
+                toolCallId,
+                requestedName || "unknown",
+                args,
+                rejectedOutput,
+              );
+            }
+            continue;
+          }
           const toolName = tool.name();
           let toolOutput: string;
           let allow = true;
@@ -424,15 +520,19 @@ export class LLMChatSession {
               toolErrorMessage = errorMessage;
             }
           }
-          await this.observeMemory(() =>
-            this.memory!.observeToolResult({
-              toolName,
-              args,
-              output: toolOutput,
-              ok: allow && !toolErrorMessage,
-              errorMessage: toolErrorMessage,
-            }),
-          );
+          // Отклонённый пользователем или не состоявшийся вызов в память не пишем:
+          // иначе запрет выглядел как «команда упала», снижал confidence процедур и
+          // порождал ложные «не повторяй».
+          if (allow && !toolErrorMessage && !options.simulatedMode) {
+            await this.observeMemory(() =>
+              this.memory!.observeToolResult({
+                toolName,
+                args,
+                output: toolOutput,
+                ok: true,
+              }),
+            );
+          }
           if (!options.silent) {
             console.log(`Tool result for ${toolName}`);
             console.log(toolOutput);
@@ -452,12 +552,11 @@ export class LLMChatSession {
           }
         }
         } catch (error) {
-          // If the user aborted during tool execution, roll back history to
-          // remove the orphaned assistant tool_calls message (and any partial
-          // tool messages), keeping the conversation valid for the next request.
-          if (this.isAbortError(error)) {
-            this.history.splice(historyBeforeToolCalls);
-          }
+          // Откат обязателен при ЛЮБОЙ ошибке, не только при abort: оставленное
+          // assistant-сообщение с tool_calls без парных tool-ответов провайдер
+          // отвергает, и каждое следующее сообщение падает с HTTP 400 — сессия
+          // агента умирает до очистки чата.
+          this.history.splice(historyBeforeToolCalls);
           throw error;
         }
         continue;
@@ -566,7 +665,8 @@ export class LLMChatSession {
   getEstimatedContextTokens(): number {
     return (
       estimateHistoryTokens(this.history) +
-      estimateToolSchemaTokens(this.toolSchema)
+      estimateToolSchemaTokens(this.toolSchema) +
+      this.lastMemoryContextTokens
     );
   }
 

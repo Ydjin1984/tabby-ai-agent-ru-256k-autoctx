@@ -76,6 +76,8 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
   private apiToken: string;
   private model: string;
   private dim: number;
+  /** Размерность, заданная пользователем (0 = auto): часть стабильного id(). */
+  private readonly dimSpec: number;
   private timeoutMs: number;
   private fetchImpl: typeof fetch;
 
@@ -83,13 +85,16 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
     this.baseUrl = normalizeOpenAIBaseUrl(options.endpoint);
     this.apiToken = options.apiToken?.trim() ?? "";
     this.model = options.model.trim();
-    this.dim = options.dimensions && options.dimensions > 0 ? options.dimensions : 0;
+    this.dimSpec = options.dimensions && options.dimensions > 0 ? options.dimensions : 0;
+    this.dim = this.dimSpec;
     this.timeoutMs = options.timeoutMs ?? 15000;
     this.fetchImpl = options.fetchImpl ?? fetch;
   }
 
   id(): string {
-    return `openai:${this.model}:${this.dim || "auto"}`;
+    // Именно dimSpec, а не автодетект dim: иначе id менялся после первого ответа
+    // сервера, все записи считались устаревшими и ре-индекс запускался при каждом старте.
+    return `openai:${this.model}:${this.dimSpec || "auto"}`;
   }
 
   dimensions(): number {
@@ -151,6 +156,7 @@ export class ResilientEmbeddingProvider implements EmbeddingProvider {
   private cooldownMs: number;
   private degradedUntil = 0;
   private lastErrorMessage = "";
+  private lastCallUsedFallback = false;
   private onFallback?: (error: unknown) => void;
 
   constructor(options: {
@@ -206,11 +212,13 @@ export class ResilientEmbeddingProvider implements EmbeddingProvider {
         if (this.primary.embedBatch) {
           const vectors = await this.primary.embedBatch(texts);
           if (vectors.length === texts.length && vectors.every((v) => v?.length)) {
+            this.lastCallUsedFallback = false;
             return vectors;
           }
         } else {
           const vectors = await Promise.all(texts.map((text) => this.primary.embed(text)));
           if (vectors.every((vector) => vector?.length)) {
+            this.lastCallUsedFallback = false;
             return vectors;
           }
         }
@@ -218,10 +226,18 @@ export class ResilientEmbeddingProvider implements EmbeddingProvider {
         this.degrade(error);
       }
     }
+    // Резервный (хеш-)провайдер отдаёт векторы другого пространства: помечаем вызов,
+    // чтобы вызывающий не записал их в память под id основного провайдера.
+    this.lastCallUsedFallback = true;
     if (this.fallback.embedBatch) {
       return this.fallback.embedBatch(texts);
     }
     return Promise.all(texts.map((text) => this.fallback.embed(text)));
+  }
+
+  /** true, если последний вызов вернул векторы резервного провайдера. */
+  usedFallback(): boolean {
+    return this.lastCallUsedFallback;
   }
 
   private degrade(error: unknown): void {

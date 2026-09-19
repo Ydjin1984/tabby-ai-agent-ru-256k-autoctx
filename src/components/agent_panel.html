@@ -221,7 +221,7 @@
               <div class="ask-user-question">{{ toolCall.question }}</div>
               <div
                 class="ask-user-choices"
-                *ngIf="toolCall.choices.length; else askUserFreeText"
+                *ngIf="toolCall.choices.length"
               >
                 <button
                   class="btn btn-sm btn-outline-primary"
@@ -232,27 +232,25 @@
                   {{ choice }}
                 </button>
               </div>
-              <ng-template #askUserFreeText>
-                <div class="ask-user-input-row">
-                  <input
-                    #askUserInput
-                    class="form-control form-control-sm"
-                    type="text"
-                    [ngModel]="getPendingUserAnswer(toolCall.id)"
-                    (ngModelChange)="updatePendingUserAnswer(toolCall.id, $event)"
-                    (keydown.enter)="submitUserAnswer(toolCall.id)"
-                    placeholder="Введите ответ"
-                  />
-                  <button
-                    class="btn btn-sm btn-primary"
-                    type="button"
-                    [disabled]="!getPendingUserAnswer(toolCall.id).trim()"
-                    (click)="submitUserAnswer(toolCall.id)"
-                  >
-                    Отправить
-                  </button>
-                </div>
-              </ng-template>
+              <div class="ask-user-input-row">
+                <input
+                  #askUserInput
+                  class="form-control form-control-sm"
+                  type="text"
+                  [ngModel]="getPendingUserAnswer(toolCall.id)"
+                  (ngModelChange)="updatePendingUserAnswer(toolCall.id, $event)"
+                  (keydown.enter)="submitUserAnswer(toolCall.id)"
+                  [placeholder]="toolCall.choices.length ? '…или свой вариант ответа' : 'Введите ответ'"
+                />
+                <button
+                  class="btn btn-sm btn-primary"
+                  type="button"
+                  [disabled]="!getPendingUserAnswer(toolCall.id).trim()"
+                  (click)="submitUserAnswer(toolCall.id)"
+                >
+                  Отправить
+                </button>
+              </div>
             </div>
             <div class="tool-result-accordion" *ngIf="hideTerminalOutput && toolCall.output && toolCall.name !== 'ask_user'; else plainToolOutput">
               <button class="tool-result-toggle" type="button" (click)="toggleToolCallOutputCollapsed(toolCall.id)">

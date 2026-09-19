@@ -48,6 +48,7 @@ import {
 import {
   EmbeddingProvider,
   HashedEmbeddingProvider,
+  ResilientEmbeddingProvider,
 } from "./embeddings";
 import { computeSuccessScore, successRate } from "./scoring";
 import {
@@ -90,7 +91,10 @@ export interface MemoryStats {
 
 export class MemoryManager implements MemoryBridge {
   private db: MemoryDatabase;
+  /** Активная сессионная память: своя на каждую панель/терминал. */
   private session: SessionMemory;
+  private sessionKey = "default";
+  private sessions = new Map<string, SessionMemory>();
   private episodic: EpisodicMemory;
   private procedural: ProceduralMemory;
   private semantic: SemanticMemory;
@@ -126,6 +130,10 @@ export class MemoryManager implements MemoryBridge {
       onPersistError: options.onPersistError,
     });
     this.session = new SessionMemory({ now: this.now });
+    // Отдельная сессионная память на каждую панель: раньше одна общая сессия
+    // смешивала goal/attempts двух вкладок, а setEnvironment одной панели
+    // переписывал окружение другой — записи получали чужую привязку.
+    this.sessions.set("default", this.session);
     this.episodic = new EpisodicMemory(this.db);
     this.procedural = new ProceduralMemory(this.db);
     this.semantic = new SemanticMemory(this.db);
@@ -138,6 +146,24 @@ export class MemoryManager implements MemoryBridge {
 
   setEnabled(value: boolean): void {
     this.enabledFlag = value;
+  }
+
+  /**
+   * Переключить активную сессионную память на конкретную панель/терминал.
+   * Панели вызывают это перед созданием сессии агента.
+   */
+  setSessionKey(key: string): void {
+    if (!key || key === this.sessionKey) {
+      return;
+    }
+    let session = this.sessions.get(key);
+    if (!session) {
+      session = new SessionMemory({ now: this.now });
+      this.sessions.set(key, session);
+    }
+    this.session = session;
+    this.session.setEnvironment(this.environment);
+    this.sessionKey = key;
   }
 
   setRetrievalLimit(value: number): void {
@@ -251,7 +277,9 @@ export class MemoryManager implements MemoryBridge {
       vector = [];
     }
     if (!vector?.length) {
-      vector = embedText(key);
+      // Хеш-вектор подставляем только когда активен хеш-провайдер: иначе вектор
+      // запроса оказывался в другом пространстве, чем векторы памяти.
+      vector = this.isHashedProvider() ? embedText(key) : [];
     }
     if (this.embeddingCache.size > 2000) {
       this.embeddingCache.clear();
@@ -280,18 +308,37 @@ export class MemoryManager implements MemoryBridge {
         (dims > 0 && entry.embeddingDimensions !== dims),
     );
     if (!stale.length) {
-      this.db.replaceAll(entries);
       return 0;
     }
 
     const texts = stale.map((entry) => entryEmbeddingText(entry));
-    let vectors: number[][] = [];
-    try {
-      vectors = this.embeddingProvider.embedBatch
-        ? await this.embeddingProvider.embedBatch(texts)
-        : await Promise.all(texts.map((text) => this.embeddingProvider.embed(text)));
-    } catch {
-      vectors = [];
+    const vectors: number[][] = [];
+    // Батчами по 64: один запрос на всю базу (сотни записей) уходил в таймаут 15 с,
+    // падал молча и выглядел как «переиндексация прошла успешно».
+    const embeddingBatchSize = 64;
+    for (let offset = 0; offset < texts.length; offset += embeddingBatchSize) {
+      const slice = texts.slice(offset, offset + embeddingBatchSize);
+      try {
+        const batch = this.embeddingProvider.embedBatch
+          ? await this.embeddingProvider.embedBatch(slice)
+          : await Promise.all(slice.map((text) => this.embeddingProvider.embed(text)));
+        for (let i = 0; i < slice.length; i++) {
+          vectors[offset + i] = batch[i];
+        }
+      } catch (error) {
+        console.warn("Память агента: не удалось пересчитать часть эмбеддингов.", error);
+      }
+    }
+
+    if (
+      this.embeddingProvider instanceof ResilientEmbeddingProvider &&
+      this.embeddingProvider.usedFallback()
+    ) {
+      // Векторы пришли из резервного (хеш-)пространства: помечать их id основного
+      // провайдера нельзя — запись навсегда выпала бы из переиндексации, а
+      // семантический поиск по ней молча деградировал бы до лексического.
+      console.warn("Память агента: провайдер эмбеддингов деградировал, переиндексация отложена.");
+      return 0;
     }
 
     const byId = new Map<string, number[]>();
@@ -302,16 +349,24 @@ export class MemoryManager implements MemoryBridge {
       }
     });
 
-    this.db.replaceAll(
-      entries.map((entry) => {
-        const vector = byId.get(entry.id);
-        return vector
-          ? stampEmbedding(entry, vector, providerId, dims || vector.length)
-          : entry;
-      }),
-    );
+    // Точечная штамповка в АКТУАЛЬНЫЕ записи вместо replaceAll снимком: раньше всё,
+    // что память успевала записать за время запроса эмбеддингов (новые эпизоды и
+    // факты, useCount, pinned, ручные правки в инспекторе), молча исчезало.
+    let restamped = 0;
+    for (const entry of entries) {
+      const vector = byId.get(entry.id);
+      if (!vector) {
+        continue;
+      }
+      const current = this.db.get(entry.id);
+      if (!current) {
+        continue;
+      }
+      this.db.upsert(stampEmbedding(current, vector, providerId, dims || vector.length));
+      restamped++;
+    }
     await this.db.flush();
-    return byId.size;
+    return restamped;
   }
 
   // ------------------------------------------------------------------
@@ -331,6 +386,7 @@ export class MemoryManager implements MemoryBridge {
       const query: MemoryQuery = {
         text: queryText,
         embedding: await this.embed(queryText),
+        embeddingModel: this.embeddingProvider.id(),
         environment: this.environment,
         now,
         limit: this.retrievalLimit,
@@ -371,6 +427,12 @@ export class MemoryManager implements MemoryBridge {
       await this.initialize();
       this.session.recordUserMessage(text);
       this.session.setGoal(text);
+      // Итог задачи, закрытой стартом новой цели (прерванный «стопом» или упавший
+      // ход), сохраняем здесь — раньше он молча выбрасывался.
+      const deferred = this.session.takeDeferredOutcome();
+      if (deferred) {
+        this.persistTaskOutcome(deferred);
+      }
     } catch {
       // best-effort
     }
@@ -399,59 +461,80 @@ export class MemoryManager implements MemoryBridge {
       if (!outcome) {
         return;
       }
-      const now = this.now();
-      const redactedOutcome: TaskOutcome = {
-        ...outcome,
-        goal: redactSecrets(outcome.goal),
-        successfulStrategy: outcome.successfulStrategy
-          ? redactSecrets(outcome.successfulStrategy)
-          : null,
-        failedStrategies: outcome.failedStrategies.map((command) => redactSecrets(command)),
-        attempts: outcome.attempts.map((attempt) => ({
-          ...attempt,
-          command: redactSecrets(attempt.command),
-        })),
-      };
-      const entry = createMemoryEntry({
-        type: "task",
-        text: redactedOutcome.goal || "Задача без описания",
-        solution: redactedOutcome.successfulStrategy ?? "",
-        environment: this.environment,
-        successCount: redactedOutcome.completed ? 1 : 0,
-        failureCount: redactedOutcome.completed ? 0 : 1,
-        score: redactedOutcome.completionConfidence,
-        sessionIds: [redactedOutcome.sessionId],
-        status: "trusted",
-        provenance: {
-          sessionId: redactedOutcome.sessionId,
-          taskId: redactedOutcome.taskId,
-          command: redactedOutcome.successfulStrategy ?? "",
-          environmentKey: environmentKey(this.environment),
-        },
-        data: { taskOutcome: redactedOutcome },
-        now,
-      });
-      mergeIntoDatabase(this.db, entry, now);
-      this.maybeConsolidate(false);
-      this.db.schedulePersist();
+      this.persistTaskOutcome(outcome);
     } catch {
       // best-effort
     }
   }
 
+  /** Записать итог задачи в память (общий путь для finishTurn и отложенных итогов). */
+  private persistTaskOutcome(outcome: TaskOutcome): void {
+    const now = this.now();
+    const redactedOutcome: TaskOutcome = {
+      ...outcome,
+      goal: redactSecrets(outcome.goal),
+      successfulStrategy: outcome.successfulStrategy
+        ? redactSecrets(outcome.successfulStrategy)
+        : null,
+      failedStrategies: (outcome.failedStrategies ?? []).map((command) => redactSecrets(command)),
+      attempts: (outcome.attempts ?? []).map((attempt) => ({
+        ...attempt,
+        command: redactSecrets(attempt.command),
+      })),
+    };
+    const entry = createMemoryEntry({
+      type: "task",
+      text: redactedOutcome.goal || "Задача без описания",
+      solution: redactedOutcome.successfulStrategy ?? "",
+      environment: this.environment,
+      successCount: redactedOutcome.completed ? 1 : 0,
+      failureCount: redactedOutcome.completed ? 0 : 1,
+      score: redactedOutcome.completionConfidence,
+      sessionIds: [redactedOutcome.sessionId],
+      status: "trusted",
+      provenance: {
+        sessionId: redactedOutcome.sessionId,
+        taskId: redactedOutcome.taskId,
+        command: redactedOutcome.successfulStrategy ?? "",
+        environmentKey: environmentKey(this.environment),
+      },
+      data: { taskOutcome: redactedOutcome },
+      now,
+    });
+    mergeIntoDatabase(this.db, entry, now);
+    this.maybeConsolidate(false);
+    this.db.schedulePersist();
+  }
+
   async observeToolResult(observation: ToolObservation): Promise<void> {
-    if (!this.enabledFlag || observation.toolName !== "run_shell_command") {
+    if (!this.enabledFlag) {
       return;
     }
     try {
       await this.initialize();
+      // Уточняющие вопросы — тоже опыт. Без этой ветки память умела учиться только
+      // на shell-командах, а её единственная «рекомендация» в каждом промпте
+      // подталкивала модель к немедленному действию вместо вопроса.
+      if (observation.toolName === "ask_user") {
+        const answer = truncate(redactSecrets(String(observation.output ?? "").trim()), 200);
+        if (answer) {
+          this.session.addFact(`Уточнение у пользователя: ${answer}`);
+          this.db.schedulePersist();
+        }
+        return;
+      }
+      if (observation.toolName !== "run_shell_command") {
+        return;
+      }
       const command = String(observation.args?.command ?? "").trim();
       if (!command) {
         return;
       }
       const now = this.now();
-      const rawOutput = truncate(observation.output ?? "", 8000);
-      const output = redactSecrets(rawOutput);
+      // Сначала редакция секретов, потом обрезка: при обратном порядке ключ или PEM,
+      // попавший на границу лимита, терял хвост и END, переставал совпадать с
+      // шаблонами и сохранялся в память целиком.
+      const output = truncate(redactSecrets(observation.output ?? ""), 8000);
       const normalized = commandSignature(command);
 
       const postcondition = evaluatePostcondition(command, output);
@@ -535,7 +618,13 @@ export class MemoryManager implements MemoryBridge {
     const now = this.now();
     const drafts = await this.embedDrafts(queued.map((entry) => redactMemoryEntry(entry)));
     for (const entry of drafts) {
-      mergeIntoDatabase(this.db, entry, now);
+      const merged = mergeIntoDatabase(this.db, entry, now);
+      // У слитого факта новый текст и сброшенный вектор. При хешированном
+      // провайдере requestReindex() ничего не делает, поэтому факт оставался без
+      // вектора до следующей консолидации (до 10 минут) и сравнивался только лексически.
+      if (merged && this.isHashedProvider()) {
+        this.db.upsert(embedEntry(merged));
+      }
     }
     // A merged fact got a new text, so its stored vector is stale.
     void this.requestReindex();
@@ -762,9 +851,13 @@ export class MemoryManager implements MemoryBridge {
 
   async clear(): Promise<void> {
     await this.initialize();
+    // Сбрасываем и очередь фактов с кэшем эмбеддингов: иначе факты, собранные до
+    // очистки, дописывались в базу сразу после «Забыть всё».
+    this.pendingFacts = [];
+    this.lastFactsKey = "";
+    this.embeddingCache.clear();
     this.db.replaceAll([]);
     this.session.reset();
-    this.lastFactsKey = "";
     await this.db.flush();
   }
 

@@ -383,7 +383,10 @@ async function main(): Promise<void> {
   assert.deepEqual(vector, [0.6, 0.8], "provider vectors must be L2-normalized");
   assert.equal(openai.dimensions(), 2, "dimensions auto-detected from the response");
   assert.equal(capturedBody.model, "bge-m3");
-  assert.equal(openai.id(), "openai:bge-m3:2");
+  // id остаётся стабильным и не зависит от автодетекта размерности: иначе после
+  // первого ответа сервера он менялся, все записи считались устаревшими и полный
+  // ре-индекс запускался при каждом старте Tabby.
+  assert.equal(openai.id(), "openai:bge-m3:auto");
 
   // ------------------------------------------------- approval policy
   assert.equal(canAutoApprove("npm run build", "medium", "medium"), true);

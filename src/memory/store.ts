@@ -13,6 +13,8 @@ import { MemoryEntry, MemoryType } from "./types";
 export interface MemoryStore {
   load(): Promise<MemoryEntry[]>;
   save(entries: MemoryEntry[]): Promise<void>;
+  /** Пометить id как удалённые этим процессом, чтобы [[JsonFileStore.save]] не вернул их из файла. */
+  forget?(ids: string[]): void;
 }
 
 export class InMemoryStore implements MemoryStore {
@@ -44,9 +46,21 @@ export class JsonFileStore implements MemoryStore {
   private filePath: string;
   /** When this process last loaded the file from disk. */
   private loadedAt = 0;
+  /**
+   * Id записей, которые этот процесс удалил сам. Без этого [[foldInForeignEntries]]
+   * возвращал их обратно из файла (они созданы позже loadedAt), поэтому «Забыть»
+   * в инспекторе, prune консолидации и clear() не давали эффекта.
+   */
+  private tombstones = new Set<string>();
 
   constructor(filePath: string) {
     this.filePath = filePath;
+  }
+
+  forget(ids: string[]): void {
+    for (const id of ids) {
+      this.tombstones.add(id);
+    }
   }
 
   getFilePath(): string {
@@ -85,7 +99,15 @@ export class JsonFileStore implements MemoryStore {
       if (error?.code === "ENOENT") {
         return [];
       }
-      throw error;
+      // Повреждённый JSON (обрыв записи, ручная правка) не должен молча отключать
+      // память навсегда: уводим файл в карантин и стартуем с пустой базы.
+      try {
+        await fs.promises.rename(this.filePath, `${this.filePath}.corrupt-${Date.now()}`);
+        console.warn(`Память агента: повреждённый файл перемещён в карантин: ${this.filePath}`);
+      } catch (renameError) {
+        console.warn("Память агента: файл памяти не читается и не перемещён.", error, renameError);
+      }
+      return [];
     }
   }
 
@@ -104,7 +126,10 @@ export class JsonFileStore implements MemoryStore {
     }
     const known = new Set(entries.map((entry) => entry.id));
     const foreign = onDisk.filter(
-      (entry) => !known.has(entry.id) && (entry.createdAt ?? 0) > this.loadedAt,
+      (entry) =>
+        !known.has(entry.id) &&
+        !this.tombstones.has(entry.id) &&
+        (entry.createdAt ?? 0) > this.loadedAt,
     );
     return foreign.length ? [...entries, ...foreign] : entries;
   }
@@ -121,6 +146,7 @@ export class MemoryDatabase {
   private store: MemoryStore;
   private persistDebounceMs: number;
   private persistTimer: ReturnType<typeof setTimeout> | null = null;
+  private persistChain: Promise<void> = Promise.resolve();
   private dirty = false;
   private onPersistError?: (error: unknown) => void;
 
@@ -171,11 +197,20 @@ export class MemoryDatabase {
 
   remove(id: string): void {
     if (this.entries.delete(id)) {
+      // Помечаем удаление, иначе следующий save прочитает запись из файла и вернёт её.
+      this.store.forget?.([id]);
       this.markDirty();
     }
   }
 
   replaceAll(entries: MemoryEntry[]): void {
+    const kept = new Set(entries.map((entry) => entry.id));
+    const dropped = this.all()
+      .filter((entry) => !kept.has(entry.id))
+      .map((entry) => entry.id);
+    // clear()/prune проходят через replaceAll: без tombstone выброшенные записи
+    // воскресали из файла на следующем debounce-save.
+    this.store.forget?.(dropped);
     this.entries = new Map(entries.map((entry) => [entry.id, entry]));
     this.markDirty();
   }
@@ -192,13 +227,18 @@ export class MemoryDatabase {
       this.persistTimer = null;
       void this.persist();
     }, this.persistDebounceMs);
-    const timer: any = this.persistTimer;
-    if (timer && typeof timer.unref === "function") {
-      timer.unref();
-    }
+    // unref() убран намеренно: с ним Tabby успевал выйти из процесса раньше, чем
+    // отрабатывал отложенный save, и последние наблюдения памяти терялись.
   }
 
   async persist(): Promise<void> {
+    // Все записи строго последовательно: два параллельных сохранения одного файла
+    // могли примениться в обратном порядке и вернуть старый снимок поверх нового.
+    this.persistChain = this.persistChain.then(() => this.persistOnce());
+    return this.persistChain;
+  }
+
+  private async persistOnce(): Promise<void> {
     if (!this.dirty) {
       return;
     }
@@ -217,5 +257,8 @@ export class MemoryDatabase {
       this.persistTimer = null;
     }
     await this.persist();
+    // Дожидаемся и записей, запущенных до нас: иначе «Забыть всё» могло вернуться
+    // раньше, чем старый снимок лёг на диск.
+    await this.persistChain;
   }
 }

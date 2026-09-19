@@ -13,7 +13,7 @@ import {
 } from "./types";
 import { emptyEnvironment, environmentKey } from "./environment";
 import { confidenceFromCounts } from "./scoring";
-import { EMBEDDING_DIM, commandTool, embedText, truncate, unique } from "./text";
+import { EMBEDDING_DIM, commandTool, embedText, fnv1a, truncate, unique } from "./text";
 import { EMBEDDING_VERSION } from "./embeddings";
 import { MemoryDatabase } from "./store";
 import { redactSecrets } from "./secrets";
@@ -202,18 +202,43 @@ export function ensureEmbedding(entry: MemoryEntry): MemoryEntry {
 
 /** Strip secrets from every persisted text field of an entry. */
 export function redactMemoryEntry(entry: MemoryEntry): MemoryEntry {
+  const outcome = entry.data?.taskOutcome;
   return {
     ...entry,
     text: redactSecrets(entry.text),
     solution: redactSecrets(entry.solution),
     action: redactSecrets(entry.action),
+    tags: (entry.tags ?? []).map((tag) => redactSecrets(tag)),
     data: {
       ...entry.data,
       attempts: entry.data.attempts?.map((attempt) => ({
         ...attempt,
         command: redactSecrets(attempt.command),
-        output: redactSecrets(attempt.output),
+        // Новые записи вывод команды не хранят; у старых он есть и должен чиститься.
+        ...(attempt.output === undefined ? {} : { output: redactSecrets(attempt.output) }),
       })),
+      avoid: entry.data.avoid?.map((item) => redactSecrets(item)),
+      // Итог задачи несёт цель, стратегии и команды попыток: без этого секреты,
+      // сохранённые старой версией, оставались в файле памяти навсегда.
+      taskOutcome: outcome
+        ? {
+            ...outcome,
+            goal: redactSecrets(outcome.goal ?? ""),
+            successfulStrategy: outcome.successfulStrategy
+              ? redactSecrets(outcome.successfulStrategy)
+              : outcome.successfulStrategy,
+            failedStrategies: (outcome.failedStrategies ?? []).map((strategy) =>
+              redactSecrets(strategy),
+            ),
+            finalValidation: outcome.finalValidation
+              ? redactSecrets(outcome.finalValidation)
+              : outcome.finalValidation,
+            attempts: (outcome.attempts ?? []).map((attempt) => ({
+              ...attempt,
+              command: redactSecrets(attempt.command),
+            })),
+          }
+        : outcome,
     },
     provenance: {
       ...entry.provenance,
@@ -286,7 +311,8 @@ function applyFactMerge(
   const sourceValues = factValuesOf(source);
   const values =
     mode === "union"
-      ? unique([...targetValues, ...sourceValues])
+      // Множество фактов не растёт бесконечно: держим последние 12 значений.
+      ? unique([...targetValues, ...sourceValues]).slice(-12)
       : sourceValues.length
         ? sourceValues
         : targetValues;
@@ -317,15 +343,23 @@ function applyFactMerge(
  */
 export function memoryMergeKey(entry: MemoryEntry): string {
   const env = environmentKey(entry.environment);
+  // Опыт разных проектов не сливаем: ключ окружения не содержит рабочего каталога,
+  // поэтому процедуры/уроки двух проектов с одинаковым runtime считались «одной
+  // памятью» и рекомендации одного проекта утекали в другой. Хеш cwd добавляется
+  // только когда каталог известен — старые записи продолжают сливаться как раньше.
+  const cwd = entry.environment?.cwd || "";
+  const project = cwd ? `|${fnv1a(cwd).toString(36)}` : "";
   switch (entry.type) {
     case "episode":
-      return `episode|${entry.data.problemSignature ?? ""}|${entry.action}|${env}`;
+      return `episode|${entry.data.problemSignature ?? ""}|${entry.action}|${env}${project}`;
     case "procedure":
-      return `procedure|${entry.data.problemSignature ?? entry.scope.tool}|${entry.action}|${env}`;
+      return `procedure|${entry.data.problemSignature ?? entry.scope.tool}|${entry.action}|${env}${project}`;
     case "lesson":
-      return `lesson|${entry.data.problemSignature ?? entry.text.toLowerCase()}|${env}`;
+      // В ключ входит само решение: два урока об одной проблеме с разными решениями —
+      // это две разные памяти, иначе второе решение терялось при слиянии.
+      return `lesson|${entry.data.problemSignature ?? entry.text.toLowerCase()}|${entry.solution || entry.action}|${env}${project}`;
     case "avoid":
-      return `avoid|${entry.data.problemSignature ?? entry.scope.tool}|${entry.data.errorSignature ?? ""}|${env}`;
+      return `avoid|${entry.data.problemSignature ?? entry.scope.tool}|${entry.data.errorSignature ?? ""}|${env}${project}`;
     case "task":
       return `task|${entry.data?.taskOutcome?.taskId ?? entry.text.toLowerCase()}`;
     case "fact":
@@ -360,8 +394,17 @@ export function mergeMemoryEntry(
   source: MemoryEntry,
   now = Date.now(),
 ): MemoryEntry {
-  const successCount = target.successCount + source.successCount;
-  const failureCount = target.failureCount + source.failureCount;
+  // Счётчики складываем только для одного и того же решения: иначе слияние двух
+  // разных решений одной проблемы раздувало уверенность выжившей записи за счёт
+  // чужих успехов, а альтернативное решение молча исчезало.
+  const sameSolution =
+    (target.solution || target.action) === (source.solution || source.action);
+  const successCount = sameSolution
+    ? target.successCount + source.successCount
+    : Math.max(target.successCount, source.successCount);
+  const failureCount = sameSolution
+    ? target.failureCount + source.failureCount
+    : Math.max(target.failureCount, source.failureCount);
   const sessionIds = unique([...target.sessionIds, ...source.sessionIds]);
   const lifecycleStatus = statusFromSessions(sessionIds.length);
   let status: ProcedureStatus =

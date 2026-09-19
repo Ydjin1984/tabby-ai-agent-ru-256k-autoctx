@@ -70,12 +70,34 @@ export interface CommandAttempt {
   timestamp: number;
 }
 
+/**
+ * Попытка в том виде, в котором она хранится в памяти.
+ *
+ * Вывод команды (`output`) не сохраняется: он нигде не читается, а весил до 40 КБ
+ * на запись. Поля `output`/`sessionId` оставлены опциональными — старые записи их
+ * содержат, и при загрузке они продолжают вычищаться от секретов.
+ */
+export interface StoredCommandAttempt {
+  id: string;
+  command: string;
+  normalizedCommand: string;
+  outcome: CommandOutcome;
+  errorSignature: string | null;
+  successScore: number;
+  postconditionMet: boolean | null;
+  timestamp: number;
+  /** Legacy: сохранённый вывод команды (чистится в [[redactMemoryEntry]]). */
+  output?: string;
+  /** Legacy: идентификатор сессии, записавшей попытку. */
+  sessionId?: string;
+}
+
 /** Type-specific payload attached to a [[MemoryEntry]]. */
 export interface MemoryData {
   problemSignature?: string;
   errorSignature?: string | null;
   cause?: string;
-  attempts?: CommandAttempt[];
+  attempts?: StoredCommandAttempt[];
   appliesWhen?: string[];
   doNotApplyWhen?: string[];
   avoid?: string[];
@@ -159,6 +181,8 @@ export interface TaskOutcome {
 export interface MemoryQuery {
   text: string;
   embedding: number[];
+  /** Провайдер, посчитавший [[embedding]]: векторы разных моделей несравнимы. */
+  embeddingModel?: string;
   environment: EnvironmentSnapshot;
   now: number;
   limit: number;

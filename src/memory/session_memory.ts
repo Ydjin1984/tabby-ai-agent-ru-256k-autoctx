@@ -66,6 +66,8 @@ export class SessionMemory {
   } | null = null;
   private completedTasks: TaskOutcome[] = [];
   private maxCompletedTasks = 100;
+  /** Итог задачи, закрытой стартом новой цели (см. [[setGoal]]). */
+  private deferredOutcome: TaskOutcome | null = null;
 
   constructor(options: SessionMemoryOptions = {}) {
     this.now = options.now ?? (() => Date.now());
@@ -96,7 +98,13 @@ export class SessionMemory {
   setGoal(goal: string): void {
     const value = (goal ?? "").trim();
     if (value && value !== this.goal) {
-      this.finalizeCurrentTask();
+      // Незакрытая задача (пользователь нажал «стоп», запрос упал) не должна
+      // исчезать молча: откладываем её итог, его сохранит вызывающий (finishTurn).
+      if (this.currentTask?.attempts.length) {
+        this.deferredOutcome = this.finalizeCurrentTask();
+      } else {
+        this.currentTask = null;
+      }
       this.taskId = `task-${++this.taskCounter}`;
       this.goal = truncate(value, 500);
       this.currentTask = {
@@ -145,6 +153,16 @@ export class SessionMemory {
 
   getCompletedTasks(): TaskOutcome[] {
     return [...this.completedTasks];
+  }
+
+  /**
+   * Итог задачи, отложенный при старте новой цели. Забирает и обнуляет: вызывающий
+   * сохраняет его так же, как обычный finishTurn.
+   */
+  takeDeferredOutcome(): TaskOutcome | null {
+    const outcome = this.deferredOutcome;
+    this.deferredOutcome = null;
+    return outcome;
   }
 
   setLastAssistant(text: string): void {
@@ -229,6 +247,7 @@ export class SessionMemory {
     this.taskCounter = 0;
     this.taskId = "task-0";
     this.currentTask = null;
+    this.deferredOutcome = null;
     this.completedTasks = [];
     this.startedAt = this.now();
   }

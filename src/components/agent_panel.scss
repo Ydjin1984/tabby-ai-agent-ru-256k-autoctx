@@ -5,6 +5,8 @@
     background: var(--theme-bg);
     user-select: text;
     -webkit-user-select: text;
+    overflow: hidden;
+    min-width: 0;
 }
 
 .ai-panel-container {
@@ -13,6 +15,8 @@
     height: 100%;
     user-select: text;
     -webkit-user-select: text;
+    overflow-x: hidden;
+    min-width: 0;
    
 }
 
@@ -227,13 +231,22 @@
                 border-radius: 4px;
                 font-family: var(--monospace-font);
                 font-size: 13px;
+                // Длинные пути и URL переносим, а не растягиваем панель.
+                overflow-wrap: anywhere;
+                word-break: break-word;
             }
 
             ::ng-deep pre {
                 margin: 8px 0;
                 padding: 12px;
                 border-radius: 6px;
-                overflow-x: auto;
+                // Блок кода переносится вместо горизонтальной прокрутки: ползунок
+                // в панели не нужен.
+                max-width: 100%;
+                overflow-x: hidden;
+                white-space: pre-wrap;
+                overflow-wrap: anywhere;
+                word-break: break-word;
                 background: var(--theme-bg);
 
                 code {
@@ -872,3 +885,130 @@
         object-fit: cover;
     }
 }
+
+/*
+ * Запрет горизонтальной прокрутки панели.
+ *
+ * При `overflow-y: auto` браузер вычисляет `overflow-x: auto` для той же оси, поэтому
+ * любой элемент шире панели (таблица markdown, длинная строка в `code`, блок кода,
+ * nowrap-плашка) вытаскивал горизонтальный ползунок всей панели. Ниже источники
+ * переполнения закрыты, а контент переносится вместо прокрутки.
+ */
+:host {
+    overflow: hidden;
+    min-width: 0;
+}
+
+.ai-panel-container {
+    overflow-x: hidden;
+    min-width: 0;
+}
+
+.header {
+    flex-wrap: wrap;
+    row-gap: 4px;
+    min-width: 0;
+
+    .title {
+        min-width: 0;
+    }
+
+    .header-actions {
+        flex-wrap: wrap;
+        min-width: 0;
+        justify-content: flex-end;
+    }
+}
+
+.context-bar {
+    flex-wrap: wrap;
+    min-width: 0;
+}
+
+.messages-wrap {
+    min-width: 0;
+    overflow: hidden;
+
+    .messages {
+        min-width: 0;
+        overflow-x: hidden;
+    }
+}
+
+.messages {
+    .message {
+        min-width: 0;
+        overflow-wrap: anywhere;
+    }
+
+    .message-content {
+        min-width: 0;
+
+        .markdown-content {
+            ::ng-deep a {
+                overflow-wrap: anywhere;
+            }
+
+            ::ng-deep img {
+                max-width: 100%;
+            }
+
+            ::ng-deep table {
+                width: 100%;
+                max-width: 100%;
+                table-layout: fixed;
+                border-collapse: collapse;
+                font-size: 12px;
+            }
+
+            ::ng-deep th,
+            ::ng-deep td {
+                border: 1px solid var(--theme-border);
+                padding: 4px 6px;
+                vertical-align: top;
+                overflow-wrap: anywhere;
+                word-break: break-word;
+            }
+        }
+    }
+
+    .tool-calls {
+        min-width: 0;
+
+        .tool-call-card {
+            min-width: 0;
+            overflow-wrap: anywhere;
+        }
+
+        .ask-user-card .ask-user-input-row {
+            flex-wrap: wrap;
+
+            input {
+                flex: 1;
+                min-width: 0;
+            }
+        }
+    }
+}
+
+.input-area {
+    min-width: 0;
+}
+
+.composer-row {
+    flex-wrap: wrap;
+    min-width: 0;
+
+    .ai-input {
+        min-width: 0;
+    }
+}
+
+.attachment-chip {
+    max-width: 100%;
+}
+
+.force-read-hint {
+    white-space: normal;
+}
+

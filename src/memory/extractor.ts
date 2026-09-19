@@ -145,7 +145,19 @@ export class MemoryExtractor {
         data: {
           problemSignature,
           errorSignature,
-          attempts: sourceAttempts,
+          // Вывод команд в попытках никто не читает (нужны только command/outcome),
+          // а весил он до 40 КБ на запись: память раздувалась, и каждый save
+          // перечитывал и сериализовал весь файл.
+          attempts: sourceAttempts.map((attempt) => ({
+            id: attempt.id,
+            timestamp: attempt.timestamp,
+            command: attempt.command,
+            normalizedCommand: attempt.normalizedCommand,
+            outcome: attempt.outcome,
+            errorSignature: attempt.errorSignature,
+            successScore: attempt.successScore,
+            postconditionMet: attempt.postconditionMet,
+          })),
           appliesWhen,
           doNotApplyWhen,
           postcondition: solution.postconditionMet ? "confirmed" : undefined,

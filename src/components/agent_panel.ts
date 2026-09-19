@@ -172,6 +172,14 @@ export class AIPanelComponent implements OnInit, AfterViewInit, OnDestroy {
   /** Settings that require a fresh chat session when they change. */
   private configSubscription: Subscription | null = null;
   private settingsSignature = "";
+  /** Ключ сессионной памяти этой панели: своя память на каждую вкладку. */
+  private memorySessionKey = "";
+  /** Окружение (рабочий каталог) уже определено — повторные детекты не нужны. */
+  private memoryEnvironmentResolved = false;
+  /** Контекстное меню правой кнопки в полях ввода панели. */
+  private composerContextMenuInstalled = false;
+  private composerContextMenuElement: HTMLElement | null = null;
+  private composerContextMenuHandler: ((event: MouseEvent) => void) | null = null;
 
   constructor(
     private config: ConfigService,
@@ -278,6 +286,13 @@ export class AIPanelComponent implements OnInit, AfterViewInit, OnDestroy {
     if (!this.chatSession) {
       this.lastError = "Не удалось инициализировать сессию чата.";
       return;
+    }
+
+    // Окружение (рабочий каталог) могло не определиться при открытии панели —
+    // добираем его перед первым рабочим запросом, иначе «память проекта» и привязка
+    // записей к каталогу остаются пустыми на всю жизнь панели.
+    if (!this.memoryEnvironmentResolved) {
+      void this.updateMemoryEnvironment();
     }
 
     this.lastError = null;
@@ -565,6 +580,215 @@ export class AIPanelComponent implements OnInit, AfterViewInit, OnDestroy {
 
   ngAfterViewInit(): void {
     this.focusPrompt();
+    this.installComposerContextMenu();
+  }
+
+  /**
+   * Правое меню в полях ввода панели (промпт агента и поле ответа ask_user).
+   * Tabby не показывает контекстное меню для элементов внутри панели, поэтому
+   * рисуем своё: Вырезать / Копировать / Вставить / Выделить всё. Обработчик висит
+   * на document в фазе перехвата, но реагирует только на поля панели — терминал и
+   * остальной интерфейс не затрагиваются.
+   */
+  private installComposerContextMenu(): void {
+    if (this.composerContextMenuInstalled || typeof document === "undefined") {
+      return;
+    }
+    this.composerContextMenuInstalled = true;
+    this.composerContextMenuHandler = (event: MouseEvent) => {
+      const target = event.target as HTMLElement | null;
+      const field = target?.closest?.(
+        ".ai-panel-container textarea, .ai-panel-container input[type='text']",
+      ) as HTMLInputElement | HTMLTextAreaElement | null;
+      if (!field) {
+        return;
+      }
+      this.openComposerContextMenu(event, field);
+    };
+    document.addEventListener("contextmenu", this.composerContextMenuHandler, true);
+  }
+
+  private closeComposerContextMenu(): void {
+    if (this.composerContextMenuElement) {
+      this.composerContextMenuElement.remove();
+      this.composerContextMenuElement = null;
+    }
+  }
+
+  private openComposerContextMenu(
+    event: MouseEvent,
+    field: HTMLInputElement | HTMLTextAreaElement,
+  ): void {
+    event.preventDefault();
+    event.stopPropagation();
+    this.closeComposerContextMenu();
+
+    const start = typeof field.selectionStart === "number" ? field.selectionStart : 0;
+    const end = typeof field.selectionEnd === "number" ? field.selectionEnd : 0;
+    const hasSelection = start !== end;
+    const items = [
+      { id: "cut", label: "Вырезать", enabled: hasSelection },
+      { id: "copy", label: "Копировать", enabled: hasSelection },
+      { id: "paste", label: "Вставить", enabled: true },
+      { id: "selectAll", label: "Выделить всё", enabled: Boolean(field.value) },
+    ];
+
+    const menu = document.createElement("div");
+    menu.className = "ai-agent-context-menu";
+    Object.assign(menu.style, {
+      position: "fixed",
+      zIndex: "10000",
+      minWidth: "168px",
+      padding: "4px",
+      border: "1px solid var(--theme-border, #3a3f4b)",
+      borderRadius: "8px",
+      background: "var(--theme-bg-more, #22262e)",
+      boxShadow: "0 6px 24px rgba(0,0,0,.45)",
+      fontSize: "13px",
+      color: "var(--theme-fg, #dfe3ea)",
+      userSelect: "none",
+    });
+
+    for (const item of items) {
+      const row = document.createElement("button");
+      row.type = "button";
+      row.textContent = item.label;
+      Object.assign(row.style, {
+        display: "block",
+        width: "100%",
+        padding: "6px 10px",
+        border: "0",
+        borderRadius: "6px",
+        background: "transparent",
+        color: "inherit",
+        textAlign: "left",
+        fontSize: "13px",
+        cursor: item.enabled ? "pointer" : "default",
+        opacity: item.enabled ? "1" : ".45",
+      });
+      if (item.enabled) {
+        row.addEventListener("mouseenter", () => {
+          row.style.background = "var(--theme-bg, #2c313a)";
+        });
+        row.addEventListener("mouseleave", () => {
+          row.style.background = "transparent";
+        });
+        row.addEventListener("mousedown", (mouseEvent) => {
+          mouseEvent.preventDefault();
+          mouseEvent.stopPropagation();
+        });
+        row.addEventListener("click", (clickEvent) => {
+          clickEvent.preventDefault();
+          clickEvent.stopPropagation();
+          this.applyComposerMenuAction(item.id, field);
+        });
+      }
+      menu.appendChild(row);
+    }
+
+    document.body.appendChild(menu);
+    const left = Math.min(event.clientX, Math.max(0, window.innerWidth - menu.offsetWidth - 8));
+    const top = Math.min(event.clientY, Math.max(0, window.innerHeight - menu.offsetHeight - 8));
+    menu.style.left = `${left}px`;
+    menu.style.top = `${top}px`;
+    this.composerContextMenuElement = menu;
+
+    const dismiss = (dismissEvent: Event) => {
+      if (dismissEvent.type === "mousedown" && menu.contains(dismissEvent.target as Node)) {
+        return;
+      }
+      if (dismissEvent.type === "keydown" && (dismissEvent as KeyboardEvent).key !== "Escape") {
+        return;
+      }
+      document.removeEventListener("mousedown", dismiss, true);
+      document.removeEventListener("keydown", dismiss, true);
+      window.removeEventListener("blur", dismiss, true);
+      this.closeComposerContextMenu();
+    };
+    setTimeout(() => {
+      document.addEventListener("mousedown", dismiss, true);
+      document.addEventListener("keydown", dismiss, true);
+      window.addEventListener("blur", dismiss, true);
+    }, 0);
+  }
+
+  private applyComposerMenuAction(
+    action: string,
+    field: HTMLInputElement | HTMLTextAreaElement,
+  ): void {
+    this.closeComposerContextMenu();
+    const start = typeof field.selectionStart === "number" ? field.selectionStart : field.value.length;
+    const end = typeof field.selectionEnd === "number" ? field.selectionEnd : start;
+    const selected = field.value.slice(start, end);
+
+    const notifyModel = () => {
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+    };
+    const insertText = (text: string) => {
+      field.value = field.value.slice(0, start) + text + field.value.slice(end);
+      const caret = start + text.length;
+      try {
+        field.setSelectionRange(caret, caret);
+      } catch {
+        // поле может не поддерживать выделение — не критично
+      }
+      this.lastInsertAt = Date.now();
+      notifyModel();
+      if (field.tagName === "TEXTAREA") {
+        this.autoResizeTextarea();
+      }
+    };
+    const copySelection = () => {
+      if (!selected) {
+        return;
+      }
+      if (navigator.clipboard?.writeText) {
+        navigator.clipboard.writeText(selected).catch(() => undefined);
+        return;
+      }
+      try {
+        document.execCommand("copy");
+      } catch {
+        // буфер обмена недоступен
+      }
+    };
+
+    field.focus();
+    if (action === "copy") {
+      copySelection();
+      return;
+    }
+    if (action === "cut") {
+      copySelection();
+      if (selected) {
+        insertText("");
+      }
+      return;
+    }
+    if (action === "selectAll") {
+      field.setSelectionRange(0, field.value.length);
+      return;
+    }
+    if (action === "paste") {
+      if (navigator.clipboard?.readText) {
+        navigator.clipboard
+          .readText()
+          .then((text) => {
+            if (text) {
+              insertText(text);
+            }
+          })
+          .catch(() => {
+            this.lastError = "Не удалось прочитать буфер обмена — используйте Ctrl+V.";
+          });
+        return;
+      }
+      try {
+        document.execCommand("paste");
+      } catch {
+        this.lastError = "Вставка недоступна — используйте Ctrl+V.";
+      }
+    }
   }
 
   handleContainerKeydown(event: KeyboardEvent): void {
@@ -875,6 +1099,11 @@ export class AIPanelComponent implements OnInit, AfterViewInit, OnDestroy {
       ),
     ];
 
+    // Каждая панель ведёт собственную сессионную память: иначе goal/attempts двух
+    // вкладок смешивались, а окружение одной панели переписывало окружение другой.
+    this.memorySessionKey = this.memorySessionKey || this.generateId("panel");
+    this.memoryService.manager.setSessionKey(this.memorySessionKey);
+
     this.chatSession = new LLMChatSession(
       endpoint,
       buildSystemPrompt(this.getAdditionalSystemPrompt()),
@@ -918,6 +1147,9 @@ export class AIPanelComponent implements OnInit, AfterViewInit, OnDestroy {
       shell,
       cwd,
     });
+    // Каталог может быть ещё не готов при старте панели: если он получен, повторные
+    // детекты больше не нужны, иначе пробуем при следующем запросе.
+    this.memoryEnvironmentResolved = Boolean(cwd);
   }
 
   /**
@@ -1404,14 +1636,22 @@ export class AIPanelComponent implements OnInit, AfterViewInit, OnDestroy {
     args: { question: string; choices?: string[] },
     signal?: AbortSignal,
   ): Promise<string> {
-    const toolCall = this.toolCalls.find((item) => item.id === toolCallId);
-    if (
-      !toolCall ||
-      toolCall.name !== "ask_user" ||
-      toolCall.question !== args.question
-    ) {
-      throw new Error("Unable to present ask_user prompt in the panel.");
-    }
+    // Панель обязана показать вопрос, даже если её представление вызова разошлось
+    // с аргументами инструмента. Раньше сравнение сырой строки вопроса падало при
+    // любом расхождении (пробелы/переводы строк вокруг вопроса, нормализация в
+    // инструменте) и модель получала "Unable to present ask_user prompt in the panel."
+    // вместо окна вопроса — после чего переставала спрашивать вообще.
+    const normalizedArgs: { question: string; choices?: string[] } = {
+      ...args,
+      question: typeof args.question === "string" ? args.question.trim() : args.question,
+    };
+    this.upsertToolCall(
+      this.toToolCallViewModel(toolCallId, "ask_user", normalizedArgs, {
+        status: "awaiting_user_input",
+        output: "Ожидание ввода пользователя в панели агента.",
+        errorMessage: null,
+      }),
+    );
 
     return new Promise<string>((resolve, reject) => {
       const request: PendingUserInputRequest = {

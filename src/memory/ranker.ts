@@ -70,7 +70,10 @@ export function scoreMemory(
   const semantic =
     query.embedding?.length &&
     entry.embedding?.length &&
-    query.embedding.length === entry.embedding.length
+    query.embedding.length === entry.embedding.length &&
+    // Сравниваем только векторы одного пространства: раньше проверялась лишь длина,
+    // и после смены модели эмбеддингов косинус (вес 0.35) превращался в мусор.
+    (!query.embeddingModel || !entry.embeddingModel || query.embeddingModel === entry.embeddingModel)
       ? cosineSimilarity(query.embedding, entry.embedding)
       : lexicalSimilarity(query.text, `${entry.text} ${entry.solution}`);
 
