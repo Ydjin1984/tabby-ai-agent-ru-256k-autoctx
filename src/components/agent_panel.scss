@@ -61,6 +61,38 @@
             line-height: 1;
             margin-left: 2px;
         }
+
+        .tool-toggle {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            padding: 3px 9px;
+            border: 1px solid var(--theme-border);
+            border-radius: 999px;
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 0.02em;
+            line-height: 1.6;
+            color: var(--theme-fg-muted);
+            background: transparent;
+            transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+
+            i {
+                font-size: 11px;
+            }
+
+            &:hover {
+                color: var(--theme-fg);
+                border-color: rgba(var(--theme-primary-rgb), 0.5);
+                text-decoration: none;
+            }
+
+            &.active {
+                color: var(--bs-success);
+                border-color: rgba(25, 135, 84, 0.5);
+                background: rgba(25, 135, 84, 0.12);
+            }
+        }
     }
 
     .btn-link {
@@ -267,6 +299,52 @@
                 border-left: 3px solid var(--theme-primary);
                 color: var(--theme-fg-muted);
             }
+
+            ::ng-deep h1,
+            ::ng-deep h2,
+            ::ng-deep h3,
+            ::ng-deep h4 {
+                margin: 12px 0 6px;
+                line-height: 1.3;
+                font-weight: 700;
+
+                &:first-child {
+                    margin-top: 0;
+                }
+            }
+
+            ::ng-deep h1 {
+                font-size: 17px;
+                padding-bottom: 4px;
+                border-bottom: 1px solid var(--theme-border);
+            }
+
+            ::ng-deep h2 {
+                font-size: 15px;
+            }
+
+            ::ng-deep h3 {
+                font-size: 14px;
+            }
+
+            ::ng-deep hr {
+                margin: 12px 0;
+                border: 0;
+                border-top: 1px solid var(--theme-border);
+            }
+
+            ::ng-deep strong {
+                color: var(--theme-fg);
+            }
+
+            ::ng-deep a {
+                color: var(--theme-primary);
+                text-decoration: none;
+
+                &:hover {
+                    text-decoration: underline;
+                }
+            }
         }
 
         .reasoning-content {
@@ -463,19 +541,101 @@
         .ask-user-card {
             display: flex;
             flex-direction: column;
-            gap: 10px;
-            margin-bottom: 8px;
+            gap: 12px;
+            margin-bottom: 10px;
+            padding: 12px;
+            border-radius: 10px;
+            border: 1px solid rgba(13, 110, 253, 0.35);
+            background: rgba(13, 110, 253, 0.05);
+
+            .ask-user-header {
+                display: flex;
+                align-items: center;
+                gap: 7px;
+                font-size: 11px;
+                font-weight: 700;
+                text-transform: uppercase;
+                letter-spacing: 0.05em;
+                color: #5b9dff;
+
+                .ask-user-icon {
+                    font-size: 13px;
+                }
+            }
 
             .ask-user-question {
-                font-size: 13px;
+                font-size: 14px;
                 font-weight: 600;
+                line-height: 1.45;
                 color: var(--theme-fg);
+                overflow-wrap: anywhere;
             }
 
             .ask-user-choices {
                 display: flex;
-                flex-wrap: wrap;
+                flex-direction: column;
+                gap: 6px;
+            }
+
+            .ask-user-choice {
+                display: flex;
+                align-items: center;
+                gap: 10px;
+                width: 100%;
+                padding: 9px 12px;
+                border: 1px solid var(--theme-border);
+                border-radius: 8px;
+                background: var(--theme-bg);
+                color: var(--theme-fg);
+                font-size: 13px;
+                text-align: left;
+                cursor: pointer;
+                transition: border-color 0.15s ease, background 0.15s ease, transform 0.1s ease;
+
+                &:hover {
+                    border-color: rgba(var(--theme-primary-rgb), 0.6);
+                    background: rgba(var(--theme-primary-rgb), 0.08);
+                }
+
+                &:active {
+                    transform: translateY(1px);
+                }
+
+                .ask-user-choice-index {
+                    flex: none;
+                    display: inline-flex;
+                    align-items: center;
+                    justify-content: center;
+                    width: 20px;
+                    height: 20px;
+                    border-radius: 6px;
+                    background: rgba(var(--theme-primary-rgb), 0.16);
+                    color: var(--theme-fg);
+                    font-size: 11px;
+                    font-weight: 700;
+                }
+
+                .ask-user-choice-text {
+                    min-width: 0;
+                    overflow-wrap: anywhere;
+                }
+            }
+
+            .ask-user-divider {
+                display: flex;
+                align-items: center;
                 gap: 8px;
+                margin: 2px 0;
+                font-size: 11px;
+                color: var(--theme-fg-muted);
+
+                &::before,
+                &::after {
+                    content: "";
+                    flex: 1;
+                    height: 1px;
+                    background: var(--theme-border);
+                }
             }
 
             .ask-user-input-row {
@@ -484,8 +644,20 @@
 
                 input {
                     min-width: 0;
+                    flex: 1;
+                }
+
+                .btn {
+                    flex: none;
+                    white-space: nowrap;
                 }
             }
+        }
+
+        .tool-result-markdown {
+            margin-top: 4px;
+            font-size: 13px;
+            overflow-wrap: anywhere;
         }
 
         pre {
@@ -964,10 +1136,20 @@
             ::ng-deep th,
             ::ng-deep td {
                 border: 1px solid var(--theme-border);
-                padding: 4px 6px;
+                padding: 5px 8px;
                 vertical-align: top;
                 overflow-wrap: anywhere;
                 word-break: break-word;
+            }
+
+            ::ng-deep th {
+                background: var(--theme-bg-more);
+                font-weight: 700;
+                text-align: left;
+            }
+
+            ::ng-deep tr:nth-child(even) td {
+                background: rgba(var(--theme-primary-rgb), 0.03);
             }
         }
     }
@@ -1010,5 +1192,712 @@
 
 .force-read-hint {
     white-space: normal;
+}
+
+// ==================================================================
+// Темы панели, подсветка кода, копирование, режим «журнал»
+// ==================================================================
+
+// --- Подсветка существующих (hardcoded) цветов через переменные темы ---
+
+.context-bar .endpoint-pill {
+    &.ready {
+        color: var(--ap-success);
+        border-color: var(--ap-success-line);
+        background: var(--ap-success-soft);
+    }
+
+    &.missing {
+        color: var(--ap-warn);
+        border-color: var(--ap-warn-line);
+        background: var(--ap-warn-soft);
+    }
+}
+
+.context-bar .context-meter {
+    background: var(--ap-bg2);
+    border-color: var(--ap-line);
+
+    .context-progress {
+        background: var(--ap-line);
+    }
+
+    .context-progress .progress-bar {
+        background: var(--ap-success);
+    }
+
+    &.meter-warn .context-progress .progress-bar {
+        background: var(--ap-warn);
+    }
+
+    &.meter-danger .context-progress .progress-bar {
+        background: var(--ap-danger);
+    }
+
+    &.meter-danger .context-label {
+        color: var(--ap-danger);
+    }
+}
+
+.messages .message.user {
+    background: var(--ap-user-fill);
+    border-color: var(--ap-user-border);
+}
+
+.messages .message.assistant {
+    background: var(--ap-card-bg);
+    border-color: var(--ap-card-border);
+}
+
+.messages .message.reasoning {
+    background: var(--ap-reasoning-fill);
+    border-color: var(--ap-reasoning-border);
+}
+
+.messages .message.tool {
+    background: var(--ap-warn-soft);
+    border-color: var(--ap-warn-line);
+}
+
+.messages .message .message-header .role {
+    color: var(--ap-fg-dim);
+}
+
+.messages .message.user .message-header .role {
+    color: var(--ap-user);
+}
+
+.messages .message.assistant .message-header .role {
+    color: var(--ap-assistant);
+}
+
+.messages .message.reasoning .message-header .reasoning-toggle {
+    color: var(--ap-reasoning);
+}
+
+.messages .message.system .message-header .role {
+    color: var(--ap-fg-dim);
+}
+
+.messages .message-content .tool-calls .tool-call-card {
+    background: var(--ap-card-bg);
+    border-color: var(--ap-card-border);
+    border-radius: var(--ap-radius);
+
+    &.awaiting-approval {
+        border-color: var(--ap-accent-line);
+    }
+
+    &.awaiting-user-input {
+        border-color: var(--ap-info-line);
+        background: var(--ap-info-soft);
+    }
+
+    &.awaiting-terminal-input {
+        border-color: var(--ap-warn-line);
+        background: var(--ap-warn-soft);
+    }
+
+    &.executing {
+        border-color: var(--ap-accent-line);
+    }
+
+    &.blocked {
+        border-color: var(--ap-warn-line);
+    }
+
+    &.completed {
+        border-color: var(--ap-success-line);
+    }
+
+    &.error {
+        border-color: var(--ap-danger-line);
+    }
+}
+
+.messages .message-content .tool-calls .tool-call-card .risk-badge {
+    &[data-risk="low"] {
+        background: var(--ap-success-soft);
+        color: var(--ap-success);
+    }
+
+    &[data-risk="medium"] {
+        background: var(--ap-warn-soft);
+        color: var(--ap-warn);
+    }
+
+    &[data-risk="high"],
+    &[data-risk="critical"] {
+        background: var(--ap-danger-soft);
+        color: var(--ap-danger);
+    }
+}
+
+// --- ask_user: диалог вопроса ---
+
+.messages .message-content .tool-calls .tool-call-card .ask-user-card {
+    border-color: var(--ap-info-line);
+    background: var(--ap-info-soft);
+    border-radius: var(--ap-radius);
+
+    .ask-user-header {
+        color: var(--ap-info);
+    }
+
+    .ask-user-question {
+        color: var(--ap-fg);
+    }
+
+    .ask-user-choice {
+        border-color: var(--ap-line2);
+        background: var(--ap-bg1);
+        color: var(--ap-fg);
+
+        &:hover {
+            border-color: var(--ap-info-line);
+            background: var(--ap-info-soft);
+        }
+
+        .ask-user-choice-index {
+            background: var(--ap-info-soft-2);
+            color: var(--ap-info);
+        }
+    }
+
+    .ask-user-divider {
+        color: var(--ap-fg-dim);
+
+        &::before,
+        &::after {
+            background: var(--ap-line);
+        }
+    }
+
+    .ask-user-input-row input {
+        background: var(--ap-bg2);
+        border-color: var(--ap-line2);
+        color: var(--ap-fg);
+    }
+}
+
+// --- Кнопка «Копировать ответ» ---
+
+.message .message-header .msg-copy {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 2px 8px;
+    border: 1px solid var(--ap-line2);
+    border-radius: var(--ap-btn-radius);
+    background: transparent;
+    color: var(--ap-fg-dim);
+    font-size: 10.5px;
+    font-weight: 600;
+    cursor: pointer;
+    opacity: 0.45;
+    transition: color 0.15s ease, border-color 0.15s ease, opacity 0.15s ease, background 0.15s ease;
+
+    i {
+        font-size: 10px;
+    }
+
+    &:hover {
+        color: var(--ap-fg);
+        border-color: var(--ap-accent-line);
+    }
+
+    &.copied {
+        color: var(--ap-success);
+        border-color: var(--ap-success-line);
+        background: var(--ap-success-soft);
+        opacity: 1;
+    }
+}
+
+.message:hover .message-header .msg-copy,
+.message:focus-within .message-header .msg-copy {
+    opacity: 1;
+}
+
+.message .message-header .msg-copy-group {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex: none;
+}
+
+.message .message-header .msg-copy-group .msg-copy {
+    margin-left: 0;
+}
+
+// Кликабельная версия плагина -> экспорт сессии в ZIP.
+.header .title .plugin-version {
+    cursor: pointer;
+    background: transparent;
+    font-family: inherit;
+    line-height: 1.4;
+    transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+
+    &:hover {
+        color: var(--ap-fg, var(--theme-fg));
+        border-color: var(--ap-accent-line, var(--theme-primary));
+        background: var(--ap-accent-soft, transparent);
+    }
+
+    &:focus-visible {
+        outline: 2px solid var(--ap-accent, var(--theme-primary));
+        outline-offset: 2px;
+    }
+}
+
+// --- Блоки кода (подсветка highlight.js) ---
+
+.messages .markdown-content ::ng-deep .codeblock,
+.tool-result-markdown ::ng-deep .codeblock {
+    margin: 9px 0 11px;
+    border: 1px solid var(--ap-card-border);
+    border-radius: var(--ap-btn-radius);
+    background: var(--ap-code-bg);
+    overflow: hidden;
+    box-shadow: inset 2px 0 0 var(--lang, var(--ap-fg-dim));
+
+    .code-head {
+        display: flex;
+        align-items: center;
+        height: 30px;
+        padding: 0 8px 0 11px;
+        background: var(--ap-code-head-bg);
+        border-bottom: 1px solid var(--ap-line);
+    }
+
+    .code-lang {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-family: inherit;
+        font-size: 10.5px;
+        font-weight: 700;
+        letter-spacing: 0.07em;
+        text-transform: uppercase;
+        color: var(--lang, var(--ap-fg-dim));
+    }
+
+    .code-lang::before {
+        content: "";
+        width: 7px;
+        height: 7px;
+        border-radius: 2px;
+        background: var(--lang, var(--ap-fg-dim));
+    }
+
+    .code-copy {
+        margin-left: auto;
+        padding: 3px 8px;
+        border: 1px solid var(--ap-line2);
+        border-radius: var(--ap-btn-radius);
+        background: transparent;
+        color: var(--ap-fg-dim);
+        font-size: 10.5px;
+        font-weight: 600;
+        cursor: pointer;
+        opacity: 0.5;
+        transition: color 0.15s ease, border-color 0.15s ease, opacity 0.15s ease;
+
+        &:hover {
+            color: var(--ap-fg);
+            border-color: var(--ap-accent-line);
+        }
+
+        &.copied {
+            color: var(--ap-success);
+            border-color: var(--ap-success-line);
+            opacity: 1;
+        }
+    }
+
+    &:hover .code-copy {
+        opacity: 1;
+    }
+
+    pre {
+        margin: 0;
+        padding: 11px 13px;
+        overflow-x: auto;
+        overflow-y: hidden;
+        background: transparent;
+        white-space: pre;
+        overflow-wrap: normal;
+        word-break: normal;
+        max-width: 100%;
+    }
+
+    code {
+        display: block;
+        padding: 0;
+        border: 0;
+        background: none;
+        color: var(--ap-code-fg);
+        font-family: var(--monospace-font);
+        font-size: 12px;
+        line-height: 1.6;
+        font-variant-ligatures: none;
+    }
+}
+
+.messages .markdown-content ::ng-deep .codeblock[data-lang="json"],
+.tool-result-markdown ::ng-deep .codeblock[data-lang="json"] {
+    --lang: var(--ap-lang-json);
+}
+
+.messages .markdown-content ::ng-deep .codeblock[data-lang="powershell"],
+.messages .markdown-content ::ng-deep .codeblock[data-lang="ps1"],
+.messages .markdown-content ::ng-deep .codeblock[data-lang="bash"],
+.messages .markdown-content ::ng-deep .codeblock[data-lang="sh"],
+.tool-result-markdown ::ng-deep .codeblock[data-lang="powershell"],
+.tool-result-markdown ::ng-deep .codeblock[data-lang="bash"] {
+    --lang: var(--ap-lang-powershell);
+}
+
+.messages .markdown-content ::ng-deep .codeblock[data-lang="html"],
+.messages .markdown-content ::ng-deep .codeblock[data-lang="xml"],
+.tool-result-markdown ::ng-deep .codeblock[data-lang="html"],
+.tool-result-markdown ::ng-deep .codeblock[data-lang="xml"] {
+    --lang: var(--ap-lang-html);
+}
+
+.messages .markdown-content ::ng-deep .codeblock[data-lang="yaml"],
+.messages .markdown-content ::ng-deep .codeblock[data-lang="sql"] {
+    --lang: var(--ap-syn-type);
+}
+
+// --- Токены синтаксиса ---
+
+.messages ::ng-deep .codeblock .hljs-keyword,
+.messages ::ng-deep .codeblock .hljs-built_in,
+.messages ::ng-deep .codeblock .hljs-literal,
+.messages ::ng-deep .codeblock .hljs-selector-tag {
+    color: var(--ap-syn-keyword);
+}
+
+.messages ::ng-deep .codeblock .hljs-string,
+.messages ::ng-deep .codeblock .hljs-regexp,
+.messages ::ng-deep .codeblock .hljs-addition {
+    color: var(--ap-syn-string);
+}
+
+.messages ::ng-deep .codeblock .hljs-number {
+    color: var(--ap-syn-number);
+}
+
+.messages ::ng-deep .codeblock .hljs-comment,
+.messages ::ng-deep .codeblock .hljs-quote {
+    color: var(--ap-syn-comment);
+    font-style: italic;
+}
+
+.messages ::ng-deep .codeblock .hljs-title,
+.messages ::ng-deep .codeblock .hljs-title.function_,
+.messages ::ng-deep .codeblock .hljs-function .hljs-title,
+.messages ::ng-deep .codeblock .hljs-section {
+    color: var(--ap-syn-function);
+}
+
+.messages ::ng-deep .codeblock .hljs-type,
+.messages ::ng-deep .codeblock .hljs-attr,
+.messages ::ng-deep .codeblock .hljs-attribute,
+.messages ::ng-deep .codeblock .hljs-variable,
+.messages ::ng-deep .codeblock .hljs-template-variable,
+.messages ::ng-deep .codeblock .hljs-params {
+    color: var(--ap-syn-type);
+}
+
+.messages ::ng-deep .codeblock .hljs-tag,
+.messages ::ng-deep .codeblock .hljs-name,
+.messages ::ng-deep .codeblock .hljs-deletion {
+    color: var(--ap-syn-tag);
+}
+
+.messages ::ng-deep .codeblock .hljs-punctuation,
+.messages ::ng-deep .codeblock .hljs-operator {
+    color: var(--ap-syn-punctuation);
+}
+
+// --- Меню выбора темы ---
+
+.theme-picker {
+    position: relative;
+    display: inline-flex;
+}
+
+.header .header-actions .theme-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+
+    .theme-caret {
+        font-size: 8px;
+        opacity: 0.7;
+    }
+
+    &.active {
+        color: var(--ap-accent, var(--theme-primary));
+    }
+}
+
+.theme-menu {
+    position: absolute;
+    top: calc(100% + 8px);
+    right: 0;
+    z-index: 40;
+    width: 310px;
+    max-height: 62vh;
+    overflow-y: auto;
+    padding: 6px;
+    border: 1px solid var(--ap-line2, var(--theme-border));
+    border-radius: var(--ap-radius, 10px);
+    background: var(--ap-bg1, var(--theme-bg-more));
+    box-shadow: 0 16px 44px rgba(0, 0, 0, 0.55);
+}
+
+.theme-menu-head {
+    padding: 6px 8px 8px;
+    font-size: 10.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--ap-fg-dim, var(--theme-fg-muted));
+}
+
+.theme-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 8px 9px;
+    border: 1px solid transparent;
+    border-radius: var(--ap-btn-radius, 8px);
+    background: transparent;
+    color: var(--ap-fg, var(--theme-fg));
+    text-align: left;
+    cursor: pointer;
+    transition: background 0.12s ease, border-color 0.12s ease;
+
+    &:hover {
+        background: var(--ap-bg3, var(--theme-bg));
+        border-color: var(--ap-line2, var(--theme-border));
+    }
+
+    &.current {
+        border-color: var(--ap-accent-line, var(--theme-border));
+        background: var(--ap-accent-soft, transparent);
+    }
+}
+
+.theme-swatch {
+    flex: none;
+    width: 18px;
+    height: 18px;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+}
+
+.theme-item-copy {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.theme-item-label {
+    font-size: 12.5px;
+    font-weight: 700;
+    line-height: 1.2;
+}
+
+.theme-item-desc {
+    font-size: 10.5px;
+    line-height: 1.35;
+    color: var(--ap-fg-dim, var(--theme-fg-muted));
+}
+
+.theme-item-check {
+    margin-left: auto;
+    color: var(--ap-accent, var(--theme-primary));
+    font-size: 11px;
+}
+
+// --- Стили полей ввода под тему ---
+
+.input-area {
+    background: var(--ap-bg1);
+    border-top-color: var(--ap-line);
+}
+
+.input-area textarea,
+.input-area .ai-input {
+    background: var(--ap-bg2);
+    border-color: var(--ap-line2);
+    color: var(--ap-fg);
+}
+
+.messages .markdown-content ::ng-deep code {
+    background: var(--ap-inline-bg);
+    color: var(--ap-inline-fg);
+}
+
+.messages .markdown-content ::ng-deep blockquote {
+    border-left-color: var(--ap-reasoning, var(--theme-primary));
+    color: var(--ap-fg-dim);
+}
+
+.messages .markdown-content ::ng-deep a {
+    color: var(--ap-info, var(--theme-primary));
+}
+
+// Кнопки, которые Bootstrap красит своим синим — приводим к акценту темы.
+.composer-row .send-btn,
+.messages .tool-call-actions .btn-primary,
+.messages .ask-user-input-row .btn-primary {
+    background: var(--ap-accent);
+    border-color: var(--ap-accent);
+    color: var(--ap-accent-ink);
+}
+
+.composer-row .send-btn:hover,
+.messages .tool-call-actions .btn-primary:hover,
+.messages .ask-user-input-row .btn-primary:hover {
+    background: var(--ap-accent);
+    border-color: var(--ap-accent);
+    filter: brightness(1.08);
+}
+
+// ==================================================================
+// Режим «журнал» (терминальный лог без карточек)
+// ==================================================================
+
+:host(.mode-log) {
+    .messages {
+        background: var(--ap-bg0);
+        padding: 4px 14px 12px;
+    }
+
+    .messages .message,
+    .messages .message.user,
+    .messages .message.assistant,
+    .messages .message.reasoning,
+    .messages .message.tool,
+    .messages .message.system {
+        margin: 0;
+        padding: 11px 0 12px;
+        border: 0;
+        border-bottom: 1px solid var(--ap-line);
+        border-radius: 0;
+        background: transparent;
+        box-shadow: none;
+    }
+
+    .messages .message.system {
+        border-style: solid;
+    }
+
+    .message-header {
+        justify-content: flex-start;
+        gap: 10px;
+        margin-bottom: 6px;
+    }
+
+    .message-header .role {
+        font-size: 11px;
+        text-transform: var(--ap-role-transform, uppercase);
+        letter-spacing: var(--ap-role-tracking, 0.08em);
+        color: var(--ap-fg-dim);
+    }
+
+    .message.user .message-header .role {
+        color: var(--ap-user);
+    }
+
+    .message.assistant .message-header .role {
+        color: var(--ap-assistant);
+    }
+
+    .message.user .message-header .role::before {
+        content: "\276F  ";
+    }
+
+    .message.assistant .message-header .role::before {
+        content: "\25CF  ";
+    }
+
+    .message.tool .message-header .role::before {
+        content: "\2699  ";
+    }
+
+    .message.system .message-header .role::before {
+        content: "\25A0  ";
+    }
+
+    .message-header .msg-copy {
+        margin-left: 0;
+    }
+
+    .message-content {
+        font-family: var(--ap-prose-font, var(--monospace-font));
+        font-size: var(--ap-prose-size, 12.5px);
+        line-height: var(--ap-prose-lh, 1.65);
+    }
+
+    .markdown-content ::ng-deep h1,
+    .markdown-content ::ng-deep h2,
+    .markdown-content ::ng-deep h3,
+    .markdown-content ::ng-deep h4 {
+        border: 0;
+        padding: 0;
+        color: var(--ap-fg);
+    }
+
+    .message-content .tool-calls .tool-call-card {
+        background: var(--ap-bg1);
+        border-radius: var(--ap-btn-radius);
+    }
+
+    .message-content .tool-calls .tool-call-card .ask-user-card {
+        background: var(--ap-info-soft);
+    }
+
+    .markdown-content ::ng-deep .codeblock,
+    .tool-result-markdown ::ng-deep .codeblock {
+        border-radius: 0;
+        border-left-width: 2px;
+        box-shadow: none;
+    }
+
+    .markdown-content ::ng-deep table {
+        border-radius: 0;
+    }
+
+    .input-area {
+        background: var(--ap-bg1);
+        border-top: 1px solid var(--ap-line2);
+    }
+
+    .composer-row textarea,
+    .input-area textarea,
+    .input-area .ai-input {
+        border-radius: 3px;
+    }
+
+    .send-btn {
+        border-radius: 3px;
+        background: var(--ap-accent);
+        color: var(--ap-accent-ink);
+        border: 0;
+    }
+
+    .empty-state {
+        font-family: var(--monospace-font);
+    }
 }
 

@@ -35,37 +35,101 @@
 
   <section class="settings-card">
     <div class="setting-copy">
-      <div class="setting-kicker">Провайдер</div>
-      <div class="title">Модель</div>
+      <div class="setting-kicker">Провайдеры</div>
+      <div class="title">Модели и ключи</div>
       <div class="description">
-        Выберите готовую модель — base URL, id модели и размер контекстного
-        окна подставятся автоматически. «Своя модель» оставляет поля Base URL и
-        Model редактируемыми вручную.
+        У каждого провайдера свой base URL, идентификатор модели и API-ключ.
+        Выберите провайдера — панель сразу начнёт работать с его ключом.
+        Провайдеров можно добавить сколько угодно.
       </div>
     </div>
 
     <div class="input-wrap">
-      <label class="input-label" for="ai-agent-model-preset">Модель</label>
-      <select
-        id="ai-agent-model-preset"
-        class="form-control"
-        [ngModel]="modelPreset"
-        (ngModelChange)="saveModelPreset($event)"
-      >
-        <option *ngFor="let preset of modelPresets" [value]="preset.id">
-          {{ preset.label }}
-        </option>
-        <option [value]="customPresetId">Своя модель (вручную)</option>
-      </select>
-      <div class="help-panel" *ngIf="selectedPreset as preset">
-        <div class="help-title">Что подставится</div>
-        <div>{{ preset.hint }}</div>
+      <div class="provider-empty" *ngIf="!providers.length">
+        Провайдеров пока нет. Нажмите «Добавить провайдера» и укажите base URL,
+        идентификатор модели и API-ключ.
       </div>
+      <div class="provider-list">
+        <button
+          class="provider-item"
+          type="button"
+          *ngFor="let provider of providers; trackBy: trackProvider"
+          [class.active]="provider.id === activeProviderId"
+          (click)="selectProvider(provider.id)"
+        >
+          <span class="provider-dot"></span>
+          <span class="provider-item-copy">
+            <span class="provider-label">{{ provider.label }}</span>
+            <span class="provider-endpoint">{{ provider.endpoint || "URL не задан" }}</span>
+          </span>
+          <i class="fas fa-check provider-check" *ngIf="provider.id === activeProviderId"></i>
+        </button>
+      </div>
+      <div class="provider-buttons">
+        <button class="btn btn-sm btn-primary" type="button" (click)="addProvider()">
+          <i class="fas fa-plus me-1"></i> Добавить провайдера
+        </button>
+        <button
+          class="btn btn-sm btn-outline-danger"
+          type="button"
+          *ngIf="providers.length > 1"
+          (click)="removeProvider(activeProviderId)"
+        >
+          Удалить
+        </button>
+      </div>
+    </div>
+
+    <div class="input-wrap" *ngIf="activeProvider as provider">
+      <label class="input-label" for="ai-agent-provider-label">Название</label>
+      <input
+        id="ai-agent-provider-label"
+        class="form-control"
+        type="text"
+        [ngModel]="provider.label"
+        (ngModelChange)="updateProviderField('label', $event)"
+      />
+
+      <label class="input-label" for="ai-agent-provider-endpoint">Base URL</label>
+      <input
+        id="ai-agent-provider-endpoint"
+        class="form-control"
+        type="url"
+        placeholder="https://api.example.com"
+        [ngModel]="provider.endpoint"
+        (ngModelChange)="updateProviderField('endpoint', $event)"
+        (blur)="checkLLMEndpoint()"
+      />
+
+      <label class="input-label" for="ai-agent-provider-model">Модель</label>
+      <input
+        id="ai-agent-provider-model"
+        class="form-control"
+        type="text"
+        placeholder="model-id"
+        [ngModel]="provider.model"
+        (ngModelChange)="updateProviderField('model', $event)"
+      />
+
+      <label class="input-label" for="ai-agent-provider-token">API-ключ</label>
+      <input
+        id="ai-agent-provider-token"
+        class="form-control"
+        type="password"
+        placeholder="sk-…"
+        autocomplete="off"
+        [ngModel]="provider.apiToken"
+        (ngModelChange)="updateProviderField('apiToken', $event)"
+      />
+
       <div
-        class="validation-error"
-        *ngIf="selectedPreset?.requiresToken && !apiToken"
+        class="checkpoint-status"
+        [class.checking]="endpointCheckpointStatus === 'checking'"
+        [class.valid]="endpointCheckpointStatus === 'valid'"
+        [class.invalid]="endpointCheckpointStatus === 'invalid'"
+        *ngIf="endpointCheckpointMessage"
       >
-        Для этой модели нужен API-ключ — заполните «Bearer token» ниже.
+        {{ endpointCheckpointMessage }}
       </div>
     </div>
   </section>
@@ -103,115 +167,6 @@
 
   <section class="settings-card">
     <div class="setting-copy">
-      <div class="setting-kicker">Подключение</div>
-      <div class="title">LLM endpoint</div>
-      <div class="description">
-        Введите base URL вашего OpenAI-совместимого API. Плагин сам добавляет
-        путь <code>/v1/chat/completions</code> к стриминговым запросам, поэтому
-        не указывайте его здесь.
-      </div>
-    </div>
-
-    <div class="input-wrap">
-      <label class="input-label" for="ai-agent-endpoint">Base URL</label>
-      <input
-        id="ai-agent-endpoint"
-        class="form-control"
-        type="url"
-        placeholder="http://127.0.0.1:4000"
-        [(ngModel)]="config.store.aiAgent.llmEndpoint"
-        (ngModelChange)="saveLLMEndpoint($event)"
-        (blur)="checkLLMEndpoint()"
-      />
-      <div class="hint-grid">
-        <div>
-          <span class="hint-label">Правильно</span>
-          <code>http://127.0.0.1:4000</code>
-        </div>
-        <div>
-          <span class="hint-label">Неправильно</span>
-          <code>http://127.0.0.1:4000/v1/chat/completions</code>
-        </div>
-      </div>
-      <div
-        class="checkpoint-status"
-        [class.checking]="endpointCheckpointStatus === 'checking'"
-        [class.valid]="endpointCheckpointStatus === 'valid'"
-        [class.invalid]="endpointCheckpointStatus === 'invalid'"
-        *ngIf="endpointCheckpointMessage"
-      >
-        {{ endpointCheckpointMessage }}
-      </div>
-    </div>
-  </section>
-
-  <section class="settings-card">
-    <div class="setting-copy">
-      <div class="setting-kicker">Аутентификация</div>
-      <div class="title">API-токен</div>
-      <div class="description">
-        Требуется для коммерческих OpenAI-совместимых провайдеров с
-        bearer-аутентификацией. Для локальных endpoint'ов без токена оставьте
-        пустым.
-      </div>
-    </div>
-
-    <div class="input-wrap">
-      <label class="input-label" for="ai-agent-api-token">Bearer token</label>
-      <input
-        id="ai-agent-api-token"
-        class="form-control"
-        type="password"
-        placeholder="sk-..."
-        autocomplete="off"
-        [ngModel]="apiToken"
-        (ngModelChange)="saveApiToken($event)"
-      />
-      <div class="help-panel">
-        <div class="help-title">Как отправляется</div>
-        <div>
-          Если задан, плагин добавляет заголовок
-          <code>Authorization: Bearer &lt;token&gt;</code> к checkpoint-,
-          warmup- и chat-completion запросам.
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <section class="settings-card">
-    <div class="setting-copy">
-      <div class="setting-kicker">Провайдер</div>
-      <div class="title">Имя модели</div>
-      <div class="description">
-        Идентификатор модели, отправляемый с каждым запросом. Коммерческие
-        провайдеры обычно требуют реальное имя модели вместо
-        <code>default</code>.
-      </div>
-    </div>
-
-    <div class="input-wrap">
-      <label class="input-label" for="ai-agent-model">Модель</label>
-      <input
-        id="ai-agent-model"
-        class="form-control"
-        type="text"
-        placeholder="gpt-4.1-mini"
-        [ngModel]="model"
-        (ngModelChange)="saveModel($event)"
-      />
-      <div class="help-panel">
-        <div class="help-title">Примеры</div>
-        <div>
-          Используйте точный идентификатор модели провайдера, например
-          <code>gpt-4.1</code>, <code>gpt-4.1-mini</code> или слаг маршрутизации
-          вашего шлюза.
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <section class="settings-card">
-    <div class="setting-copy">
       <div class="setting-kicker">Безопасность</div>
       <div class="title">Подтверждение команд</div>
       <div class="description">
@@ -243,6 +198,125 @@
           Опасные команды (форматирование диска, рекурсивное удаление, реестр,
           firewall, shutdown) всегда требуют явного подтверждения, независимо от
           настройки.
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="settings-card">
+    <div class="setting-copy">
+      <div class="setting-kicker">Интернет</div>
+      <div class="title">Веб-поиск и глубокий ресёрч</div>
+      <div class="description">
+        Агент ищет в интернете через DuckDuckGo без API-ключа. Быстрый режим
+        возвращает заголовки, ссылки и описания; глубокий ресёрч сам разбивает
+        вопрос на подзапросы, читает несколько источников и формирует досье.
+        Режимы также переключаются кнопками <b>Web</b> и <b>Deep</b> в шапке панели.
+      </div>
+    </div>
+
+    <div class="input-wrap">
+      <label class="toggle-card">
+        <input
+          type="checkbox"
+          [ngModel]="webSearchEnabled"
+          (ngModelChange)="saveWebSearchEnabled($event)"
+        />
+        <span class="toggle-copy">
+          <span class="toggle-title">Веб-поиск (web_search)</span>
+          <span class="toggle-description">
+            Быстрый поиск: факты, версии, новости, документация, тексты ошибок.
+          </span>
+        </span>
+      </label>
+
+      <label class="toggle-card">
+        <input
+          type="checkbox"
+          [ngModel]="deepSearchEnabled"
+          (ngModelChange)="saveDeepSearchEnabled($event)"
+        />
+        <span class="toggle-copy">
+          <span class="toggle-title">Глубокий ресёрч (deep_search + web_fetch)</span>
+          <span class="toggle-description">
+            Многошаговое исследование: подзапросы, чтение источников, структурированное
+            досье со ссылками.
+          </span>
+        </span>
+      </label>
+    </div>
+
+    <div class="input-wrap">
+      <label class="input-label" for="ai-agent-web-search-results">
+        Результатов на запрос: <strong>{{ webSearchMaxResults }}</strong>
+      </label>
+      <input
+        id="ai-agent-web-search-results"
+        class="form-range"
+        type="range"
+        min="1"
+        max="15"
+        step="1"
+        [ngModel]="webSearchMaxResults"
+        (ngModelChange)="saveWebSearchMaxResults($event)"
+      />
+      <div class="range-labels">
+        <span>1</span>
+        <span>15</span>
+      </div>
+
+      <label class="input-label" for="ai-agent-deep-search-pages">
+        Источников в глубоком поиске: <strong>{{ deepSearchMaxPages }}</strong>
+      </label>
+      <input
+        id="ai-agent-deep-search-pages"
+        class="form-range"
+        type="range"
+        min="1"
+        max="10"
+        step="1"
+        [ngModel]="deepSearchMaxPages"
+        (ngModelChange)="saveDeepSearchMaxPages($event)"
+      />
+      <div class="range-labels">
+        <span>1</span>
+        <span>10</span>
+      </div>
+    </div>
+
+    <div class="input-wrap">
+      <label class="input-label" for="ai-agent-web-timeout">
+        Таймаут запроса, мс
+      </label>
+      <input
+        id="ai-agent-web-timeout"
+        class="form-control"
+        type="number"
+        min="1000"
+        max="60000"
+        step="500"
+        [ngModel]="webSearchTimeoutMs"
+        (ngModelChange)="saveWebSearchTimeoutMs($event)"
+      />
+      <label class="input-label" for="ai-agent-web-chars">
+        Символов текста со страницы
+      </label>
+      <input
+        id="ai-agent-web-chars"
+        class="form-control"
+        type="number"
+        min="500"
+        max="20000"
+        step="500"
+        [ngModel]="webFetchCharLimit"
+        (ngModelChange)="saveWebFetchCharLimit($event)"
+      />
+      <div class="help-panel">
+        <div class="help-title">Безопасность</div>
+        <div>
+          Разрешены только публичные http(s)-адреса: локальные и служебные адреса
+          блокируются. Ссылки и факты берутся из выдачи поиска, а не выдумываются
+          моделью.
         </div>
       </div>
     </div>
@@ -298,62 +372,6 @@
       </div>
     </div>
 
-    <div class="input-wrap">
-      <label class="input-label" for="ai-agent-memory-embedding-provider">
-        Embeddings для поиска памяти
-      </label>
-      <select
-        id="ai-agent-memory-embedding-provider"
-        class="form-control"
-        [ngModel]="memoryEmbeddingProvider"
-        (ngModelChange)="saveMemoryEmbeddingProvider($event)"
-      >
-        <option value="auto">Авто: Kibborg_Embed_v1 (8082) + офлайн-фоллбэк</option>
-        <option value="openai">Только OpenAI-совместимый /v1/embeddings</option>
-        <option value="hashed">Hashed (офлайн, без модели)</option>
-      </select>
-      <div class="help-panel">
-        <div class="help-title">Почему не LLM endpoint</div>
-        <div>
-          Шлюз чата Kibborg (8083) на <code>/v1/embeddings</code> отвечает
-          <code>501 Not Implemented</code>, поэтому адрес эмбеддингов задаётся
-          отдельно (порт 8082). Если сервер недоступен, «Авто» переходит на
-          офлайн-векторы и возвращается к модели, когда она снова отвечает.
-        </div>
-      </div>
-    </div>
-
-    <div class="input-wrap" *ngIf="memoryEmbeddingProvider !== 'hashed'">
-      <label class="input-label" for="ai-agent-memory-embedding-model">
-        Модель эмбеддингов
-      </label>
-      <input
-        id="ai-agent-memory-embedding-model"
-        class="form-control"
-        type="text"
-        placeholder="Kibborg_Embed_v1"
-        [ngModel]="memoryEmbeddingModel"
-        (ngModelChange)="saveMemoryEmbeddingModel($event)"
-      />
-      <label class="input-label" for="ai-agent-memory-embedding-endpoint">
-        Endpoint эмбеддингов
-      </label>
-      <input
-        id="ai-agent-memory-embedding-endpoint"
-        class="form-control"
-        type="url"
-        placeholder="http://127.0.0.1:8082"
-        [ngModel]="memoryEmbeddingEndpoint"
-        (ngModelChange)="saveMemoryEmbeddingEndpoint($event)"
-      />
-      <div class="help-panel">
-        <div class="help-title">Автоматическая переиндексация</div>
-        <div>
-          При смене модели старые векторы несовместимы — плагин помечает их и
-          переиндексирует память через новый провайдер.
-        </div>
-      </div>
-    </div>
   </section>
 
   <section class="settings-card">
@@ -449,6 +467,29 @@
           </span>
         </span>
       </label>
+    </div>
+
+    <div class="input-wrap">
+      <label class="input-label" for="ai-agent-panel-theme">
+        Тема оформления панели
+      </label>
+      <select
+        id="ai-agent-panel-theme"
+        class="form-control"
+        [ngModel]="panelTheme"
+        (ngModelChange)="savePanelTheme($event)"
+      >
+        <option *ngFor="let theme of panelThemes" [value]="theme.id">
+          {{ theme.label }}
+        </option>
+      </select>
+      <div class="help-panel">
+        <div class="help-title">Расширяемо</div>
+        <div>
+          Темы описаны в <code>src/lib/panel_themes.ts</code>. Добавьте новый объект в
+          список — и он сразу появится здесь и в меню «Тема» в шапке панели.
+        </div>
+      </div>
     </div>
   </section>
 

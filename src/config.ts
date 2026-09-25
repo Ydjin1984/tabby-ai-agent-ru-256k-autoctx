@@ -1,6 +1,13 @@
 import { ConfigProvider, Platform } from "tabby-core";
-import { CUSTOM_PRESET_ID, ReasoningEffort } from "./lib/model_presets";
+import { ReasoningEffort } from "./lib/model_presets";
 import { AutoApproveMaxRisk } from "./lib/command_risk";
+import { DEFAULT_PANEL_THEME_ID } from "./lib/panel_themes";
+import {
+  AIProviderConfig,
+  DEFAULT_PROVIDER_ID,
+  DEFAULT_PROVIDERS,
+  cloneProviders,
+} from "./lib/providers";
 
 export type AIProvider = "openrouter" | "litellm";
 export type PanelPosition = "left" | "right" | "top" | "bottom";
@@ -9,11 +16,10 @@ export interface AIAgentConfig {
   llmEndpoint: string;
   apiToken: string;
   model: string;
-  /**
-   * Selected model preset id (`kibborg`, `deepseek-flash`,
-   * `deepseek-v4-pro`, or `custom` when the endpoint/model are typed by hand).
-   */
-  modelPreset: string;
+  /** All configured providers, each with its own API key. */
+  providers: AIProviderConfig[];
+  /** Id of the provider currently applied to the panel. */
+  activeProviderId: string;
   /** Reasoning level applied to every request; `off` disables thinking. */
   reasoningEffort: ReasoningEffort;
   autoApproveLowRiskCommands: boolean;
@@ -45,15 +51,32 @@ export interface AIAgentConfig {
   memoryEmbeddingModel: string;
   /** Expected dimensions (0 = auto-detect). */
   memoryEmbeddingDimensions: number;
+  /** Enable the `web_search` tool (quick DuckDuckGo lookups). */
+  webSearchEnabled: boolean;
+  /** Enable the `deep_search` tool (multi-source research dossier). */
+  deepSearchEnabled: boolean;
+  /** Max results per web search query. */
+  webSearchMaxResults: number;
+  /** Max sources a deep search reads in full. */
+  deepSearchMaxPages: number;
+  /** Per-request timeout for web calls, milliseconds. */
+  webSearchTimeoutMs: number;
+  /** Max characters extracted from one page. */
+  webFetchCharLimit: number;
+  /** Visual theme of the panel (see lib/panel_themes). Default: neon-log. */
+  panelTheme: string;
 }
+
+const DEFAULT_ACTIVE_PROVIDER = DEFAULT_PROVIDERS[0];
 
 export class AIAgentConfigProvider extends ConfigProvider {
   defaults = {
     aiAgent: {
-      llmEndpoint: "",
-      apiToken: "",
-      model: "default",
-      modelPreset: CUSTOM_PRESET_ID,
+      llmEndpoint: DEFAULT_ACTIVE_PROVIDER?.endpoint ?? "",
+      apiToken: DEFAULT_ACTIVE_PROVIDER?.apiToken ?? "",
+      model: DEFAULT_ACTIVE_PROVIDER?.model ?? "default",
+      providers: cloneProviders(),
+      activeProviderId: DEFAULT_ACTIVE_PROVIDER?.id ?? DEFAULT_PROVIDER_ID,
       reasoningEffort: "off" as ReasoningEffort,
       autoApproveLowRiskCommands: false,
       autoApproveAllCommands: false,
@@ -75,6 +98,15 @@ export class AIAgentConfigProvider extends ConfigProvider {
       memoryEmbeddingEndpoint: "http://127.0.0.1:8082",
       memoryEmbeddingModel: "Kibborg_Embed_v1",
       memoryEmbeddingDimensions: 0,
+      // Интернет-инструменты по умолчанию выключены: их включают тумблерами в
+      // шапке панели (Web / Deep), чтобы модель не ходила в сеть без запроса.
+      webSearchEnabled: false,
+      deepSearchEnabled: false,
+      webSearchMaxResults: 6,
+      deepSearchMaxPages: 6,
+      webSearchTimeoutMs: 8000,
+      webFetchCharLimit: 4000,
+      panelTheme: DEFAULT_PANEL_THEME_ID,
     },
     hotkeys: {
       "toggle-ai-agent-panel": ["Ctrl-Alt-A"],

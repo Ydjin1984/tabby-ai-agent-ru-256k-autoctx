@@ -1,6 +1,7 @@
 import { Tool } from "./tool_types";
 import { MemoryBridge } from "../memory/types";
 import defaultSystemPromptTemplate from "../prompts/default_system_prompt.md";
+import outputStyleSystemPrompt from "../prompts/output_style_system_prompt.md";
 import {
   buildChatCompletionsUrl,
   buildCheckpointRequestBody,
@@ -14,6 +15,7 @@ import {
 } from "./context_usage";
 import { injectMemoryIntoMessages } from "./request_messages";
 import { stripReasoningParameters, looksRepetitive } from "./request_defaults";
+import { agentLog } from "./debug_log";
 
 export interface LLMHistoryItem {
   role: "system" | "user" | "assistant" | "tool" | "reasoning";
@@ -37,6 +39,9 @@ export function buildSystemPrompt(additionalPrompt?: string): string {
   if (extra) {
     parts.push(extra);
   }
+  // Стиль ответа и правило уточняющих вопросов идут последними: они должны
+  // применяться ко всем ответам, включая случаи со своим дополнительным промптом.
+  parts.push(outputStyleSystemPrompt.trim());
   return parts.join("\n\n");
 }
 
@@ -239,22 +244,33 @@ export class LLMChatSession {
 
     while (true) {
       this.throwIfAborted(options.signal);
+      const effectiveParams = this.disableReasoning
+        ? stripReasoningParameters(this.extraParameters)
+        : this.extraParameters;
+      const requestMessages = this.buildRequestMessages(memoryContext);
+      agentLog("request", {
+        model: this.model,
+        endpoint: this.baseUrl,
+        disableReasoning: this.disableReasoning,
+        messages: requestMessages.length,
+        tools: this.tools?.map((tool) => tool.name()),
+        params: effectiveParams,
+      });
       const response = await fetch(buildChatCompletionsUrl(this.baseUrl), {
         method: "POST",
         headers: buildRequestHeaders(this.apiToken),
         signal: options.signal,
         body: JSON.stringify({
           model: this.model,
-          messages: this.buildRequestMessages(memoryContext),
+          messages: requestMessages,
           stream: true,
           tools: this.toolSchema,
-          ...(this.disableReasoning
-            ? stripReasoningParameters(this.extraParameters)
-            : this.extraParameters),
+          ...effectiveParams,
         }),
       });
       if (!response.ok) {
         console.log(this.history);
+        agentLog("api_error", { status: response.status, statusText: response.statusText });
         throw new Error(`API error: ${response.status} ${response.statusText}`);
       }
       const reader = response.body!.getReader();
@@ -262,7 +278,7 @@ export class LLMChatSession {
       let fullContent = "";
       let fullReasoning = "";
       const requestedToolCalls: Record<number, ToolCallAccumulator> = {};
-      let finishReason: "tool_calls" | "stop" | null = null;
+      let finishReason: "tool_calls" | "stop" | "length" | null = null;
       let lastStdoutWasReasoning = false;
       let sseBuffer = "";
       while (true) {
@@ -365,16 +381,36 @@ export class LLMChatSession {
         if (done) break;
       }
 
+      agentLog("finish", {
+        reason: finishReason,
+        contentLen: fullContent.length,
+        reasoningLen: fullReasoning.length,
+        toolCalls: Object.values(requestedToolCalls).map(
+          (toolCall) => toolCall.function.name,
+        ),
+      });
+
       if (fullReasoning)
         await pushHistory({ role: "reasoning", content: fullReasoning });
 
-      if (finishReason === "tool_calls") {
+      const assistantToolCalls = Object.values(requestedToolCalls);
+      // Execute the requested tools on a normal `tool_calls` finish AND when the
+      // generation was cut by the token limit but had already produced tool
+      // calls. The reasoning brain often emits 1-8k tokens of thinking before the
+      // call; treating `length` as a plain truncated answer silently dropped the
+      // commands (the user saw a long text answer and nothing ran).
+      if (
+        finishReason === "tool_calls" ||
+        (finishReason === "length" && assistantToolCalls.length > 0)
+      ) {
         // Snapshot history length before pushing the assistant tool_calls message.
         // If we are aborted mid-tool-execution, we must roll back to keep the
         // conversation valid – an assistant message with tool_calls MUST be
         // followed by exactly one tool message per tool_call.
         const historyBeforeToolCalls = this.history.length;
-        const assistantToolCalls = Object.values(requestedToolCalls);
+        // No artificial step limit: the only ceiling is the context window, and
+        // automatic compaction keeps that in check. The agent may take as many
+        // tool rounds as the task needs.
         if (!assistantToolCalls.length) {
           // Поток обещал вызовы инструментов, но не принёс ни одного: пустой
           // assistant.tool_calls провайдер отвергает так же, как висячий.
@@ -427,6 +463,7 @@ export class LLMChatSession {
                 : "модель запросила инструмент без имени (поток ответа оборвался)";
             const rejectedOutput = `Вызов инструмента отклонён: ${reason}. Повтори вызов корректно.`;
             console.warn(`Отклонён вызов инструмента: ${reason}`);
+            agentLog("tool_rejected", { name: requestedName, reason });
             await this.observeMemory(() =>
               this.memory!.observeToolResult({
                 toolName: requestedName || "unknown",
@@ -456,6 +493,7 @@ export class LLMChatSession {
           let allow = true;
           let stopAfterToolResult = false;
           let toolErrorMessage: string | undefined;
+          agentLog("tool_call", { name: toolName, args });
           if (!options.silent)
             console.log(`Tool call: ${toolName} with args`, args);
           if (options.onToolCall) {
@@ -533,6 +571,12 @@ export class LLMChatSession {
               }),
             );
           }
+          agentLog("tool_result", {
+            name: toolName,
+            ok: !toolErrorMessage && allow,
+            error: toolErrorMessage,
+            output: toolOutput,
+          });
           if (!options.silent) {
             console.log(`Tool result for ${toolName}`);
             console.log(toolOutput);
@@ -570,7 +614,8 @@ export class LLMChatSession {
         if (!options.silent) process.stdout.write("\n");
         return fullContent;
       } else if (finishReason === "length") {
-        // Generation stopped by the token limit.
+        // Generation stopped by the token limit (no tool calls were requested:
+        // the tool-call case is handled above, even on a length finish).
         const truncated = fullContent.trim();
         const looped = looksRepetitive(truncated);
         // A usable (merely long) answer is returned; a looping one is garbage and
@@ -593,6 +638,10 @@ export class LLMChatSession {
         // throwing or handing the user a wall of repeated text.
         if ((fullReasoning.trim() || truncated) && !this.disableReasoning) {
           this.disableReasoning = true;
+          agentLog("length_retry", {
+            reason: looped ? "looped" : "empty_after_reasoning",
+            reasoningLen: fullReasoning.length,
+          });
           await options.onDiscardDraft?.();
           if (!options.silent) process.stdout.write("\n");
           await options.onNotice?.(

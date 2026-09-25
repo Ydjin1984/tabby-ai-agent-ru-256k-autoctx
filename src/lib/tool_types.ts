@@ -17,6 +17,16 @@ export interface ToolExecutionState {
   output?: string | null;
 }
 
+/**
+ * Маркер промежуточного прогресса в выводе инструмента. Панель по этому префиксу
+ * понимает, что вызов ещё выполняется, и не помечает его завершённым раньше времени.
+ */
+export const TOOL_PROGRESS_PREFIX = "ПРОГРЕСС:";
+
+export function toolProgress(message: string): string {
+  return `${TOOL_PROGRESS_PREFIX} ${String(message ?? "").trim()}`;
+}
+
 export interface ToolExecutionContext {
   signal?: AbortSignal;
   toolCallId?: string;

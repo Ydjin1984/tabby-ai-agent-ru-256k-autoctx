@@ -1,6 +1,6 @@
 <div
   class="ai-panel-container"
-  (click)="$event.stopPropagation()"
+  (click)="onPanelClick($event)"
   (mousedown)="onPanelMouseDown($event)"
   (keydown)="handleContainerKeydown($event)"
 >
@@ -8,9 +8,71 @@
     <div class="title">
       <i class="fas fa-robot me-2"></i>
       <span>AI Агент</span>
-      <span class="plugin-version" title="Версия плагина">v3</span>
+      <button
+        class="plugin-version"
+        type="button"
+        (click)="exportSession()"
+        title="Экспортировать историю сессии в ZIP (session.json + session.md)"
+      >
+        v3
+      </button>
     </div>
     <div class="header-actions ms-auto">
+      <button
+        class="btn btn-link btn-sm tool-toggle"
+        type="button"
+        [class.active]="webSearchEnabled"
+        [attr.aria-pressed]="webSearchEnabled"
+        (click)="toggleWebSearch()"
+        title="Веб-поиск (DuckDuckGo): быстрые факты из интернета. Включает инструмент web_search."
+      >
+        <i class="fas fa-globe"></i>
+        <span>Web</span>
+      </button>
+      <button
+        class="btn btn-link btn-sm tool-toggle"
+        type="button"
+        [class.active]="deepSearchEnabled"
+        [attr.aria-pressed]="deepSearchEnabled"
+        (click)="toggleDeepSearch()"
+        title="Глубокий ресёрч: разбор вопроса на подзапросы, чтение источников, досье. Включает deep_search и web_fetch."
+      >
+        <i class="fas fa-search-plus"></i>
+        <span>Deep</span>
+      </button>
+      <div class="theme-picker">
+        <button
+          class="btn btn-link btn-sm theme-toggle"
+          type="button"
+          [class.active]="themeMenuOpen"
+          (click)="toggleThemeMenu($event)"
+          title="Тема оформления панели"
+        >
+          <i class="fas fa-palette"></i>
+          <span>Тема</span>
+          <i class="fas fa-chevron-down theme-caret"></i>
+        </button>
+        <div class="theme-menu" *ngIf="themeMenuOpen">
+          <div class="theme-menu-head">Оформление панели</div>
+          <button
+            class="theme-item"
+            type="button"
+            *ngFor="let theme of panelThemes; trackBy: trackTheme"
+            [class.current]="theme.id === currentThemeId"
+            (click)="selectTheme(theme.id)"
+          >
+            <span
+              class="theme-swatch"
+              [style.background]="theme.swatch"
+            ></span>
+            <span class="theme-item-copy">
+              <span class="theme-item-label">{{ theme.label }}</span>
+              <span class="theme-item-desc">{{ theme.description }}</span>
+            </span>
+            <i class="fas fa-check theme-item-check" *ngIf="theme.id === currentThemeId"></i>
+          </button>
+        </div>
+      </div>
       <button
         class="btn btn-link btn-sm"
         type="button"
@@ -71,7 +133,7 @@
   </div>
 
   <div class="messages-wrap">
-    <div #messagesContainer class="messages" (scroll)="onMessagesScroll()">
+    <div #messagesContainer class="messages" (scroll)="onMessagesScroll()" (click)="onMessagesClick($event)">
     <div class="empty-state" *ngIf="messages.length === 0">
       <i class="fas fa-comments empty-state-icon"></i>
       <div class="empty-state-title">Спросите агента</div>
@@ -87,6 +149,7 @@
     <div
       class="message"
       *ngFor="let message of messages; trackBy: trackMessage"
+      [attr.data-message-id]="message.id"
       [class.user]="message.role === 'user'"
       [class.assistant]="message.role === 'assistant'"
       [class.reasoning]="message.role === 'reasoning'"
@@ -120,6 +183,31 @@
         <span class="stream-state text-muted" *ngIf="message.streaming">
           идёт генерация
         </span>
+        <div
+          class="msg-copy-group"
+          *ngIf="message.role === 'assistant' && message.content"
+        >
+          <button
+            class="msg-copy"
+            type="button"
+            [class.copied]="copiedMessageId === message.id"
+            (click)="copyAssistantMarkdown(message)"
+            [title]="copiedMessageId === message.id ? 'Markdown скопирован' : 'Скопировать ответ как Markdown (с таблицами и кодом)'"
+          >
+            <i class="fas" [class.fa-file-code]="copiedMessageId !== message.id" [class.fa-check]="copiedMessageId === message.id"></i>
+            <span>{{ copiedMessageId === message.id ? "Скопировано" : "Markdown" }}</span>
+          </button>
+          <button
+            class="msg-copy"
+            type="button"
+            [class.copied]="copiedTextMessageId === message.id"
+            (click)="copyAssistantText(message)"
+            [title]="copiedTextMessageId === message.id ? 'Текст скопирован' : 'Скопировать как обычный текст (без разметки)'"
+          >
+            <i class="fas" [class.fa-align-left]="copiedTextMessageId !== message.id" [class.fa-check]="copiedTextMessageId === message.id"></i>
+            <span>{{ copiedTextMessageId === message.id ? "Скопировано" : "Текст" }}</span>
+          </button>
+        </div>
       </div>
 
       <div class="message-content" *ngIf="!message.collapsed">
@@ -218,38 +306,47 @@
               class="ask-user-card"
               *ngIf="toolCall.status === 'awaiting_user_input' && toolCall.question"
             >
+              <div class="ask-user-header">
+                <i class="fas fa-circle-question ask-user-icon"></i>
+                <span>Агент задаёт вопрос</span>
+              </div>
               <div class="ask-user-question">{{ toolCall.question }}</div>
-              <div
-                class="ask-user-choices"
-                *ngIf="toolCall.choices.length"
-              >
+
+              <div class="ask-user-choices" *ngIf="toolCall.choices.length">
                 <button
-                  class="btn btn-sm btn-outline-primary"
+                  class="ask-user-choice"
                   type="button"
-                  *ngFor="let choice of toolCall.choices"
+                  *ngFor="let choice of toolCall.choices; let i = index"
                   (click)="submitUserAnswer(toolCall.id, choice)"
                 >
-                  {{ choice }}
+                  <span class="ask-user-choice-index">{{ i + 1 }}</span>
+                  <span class="ask-user-choice-text">{{ choice }}</span>
                 </button>
               </div>
-              <div class="ask-user-input-row">
-                <input
-                  #askUserInput
-                  class="form-control form-control-sm"
-                  type="text"
-                  [ngModel]="getPendingUserAnswer(toolCall.id)"
-                  (ngModelChange)="updatePendingUserAnswer(toolCall.id, $event)"
-                  (keydown.enter)="submitUserAnswer(toolCall.id)"
-                  [placeholder]="toolCall.choices.length ? '…или свой вариант ответа' : 'Введите ответ'"
-                />
-                <button
-                  class="btn btn-sm btn-primary"
-                  type="button"
-                  [disabled]="!getPendingUserAnswer(toolCall.id).trim()"
-                  (click)="submitUserAnswer(toolCall.id)"
-                >
-                  Отправить
-                </button>
+
+              <div class="ask-user-custom">
+                <div class="ask-user-divider" *ngIf="toolCall.choices.length">
+                  <span>или свой вариант</span>
+                </div>
+                <div class="ask-user-input-row">
+                  <input
+                    #askUserInput
+                    class="form-control form-control-sm"
+                    type="text"
+                    [ngModel]="getPendingUserAnswer(toolCall.id)"
+                    (ngModelChange)="updatePendingUserAnswer(toolCall.id, $event)"
+                    (keydown.enter)="submitUserAnswer(toolCall.id)"
+                    [placeholder]="toolCall.choices.length ? 'Введите свой ответ…' : 'Введите ответ…'"
+                  />
+                  <button
+                    class="btn btn-sm btn-primary"
+                    type="button"
+                    [disabled]="!getPendingUserAnswer(toolCall.id).trim()"
+                    (click)="submitUserAnswer(toolCall.id)"
+                  >
+                    Ответить
+                  </button>
+                </div>
               </div>
             </div>
             <div class="tool-result-accordion" *ngIf="hideTerminalOutput && toolCall.output && toolCall.name !== 'ask_user'; else plainToolOutput">
@@ -260,7 +357,12 @@
               <pre *ngIf="!toolCall.outputCollapsed">{{ toolCall.output }}</pre>
             </div>
             <ng-template #plainToolOutput>
-              <pre *ngIf="toolCall.output">{{ toolCall.output }}</pre>
+              <div
+                class="tool-result-markdown markdown-content"
+                *ngIf="isRichToolOutput(toolCall) && toolCall.output"
+                [innerHTML]="toolCall.output | aiMarkdown"
+              ></div>
+              <pre *ngIf="!isRichToolOutput(toolCall) && toolCall.output">{{ toolCall.output }}</pre>
             </ng-template>
             <div class="tool-error text-danger" *ngIf="toolCall.errorMessage">
               {{ toolCall.errorMessage }}

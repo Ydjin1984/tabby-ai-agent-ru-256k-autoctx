@@ -11,8 +11,13 @@
   },
   "include": [
     "src/lib/model_presets.ts",
+    "src/lib/providers.ts",
     "src/lib/llm_endpoint.ts",
     "src/lib/request_defaults.ts",
+    "src/lib/web_client.ts",
+    "src/lib/panel_themes.ts",
+    "src/lib/markdown_renderer.ts",
+    "src/lib/zip.ts",
     "src/memory/**/*.ts",
     "tests/**/*.ts"
   ],

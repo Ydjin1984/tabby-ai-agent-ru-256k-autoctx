@@ -8,6 +8,7 @@ import {
   Output,
   ViewChild,
   ElementRef,
+  HostListener,
 } from "@angular/core";
 import { ConfigService, HotkeysService } from "tabby-core";
 import { BaseTerminalTabComponent, Frontend } from "tabby-terminal";
@@ -17,12 +18,36 @@ import {
   LLMChatSession,
   LLMHistoryItem,
 } from "../lib/llm_chat_session";
-import { Tool, ToolExecutionState } from "../lib/tool_types";
+import { TOOL_PROGRESS_PREFIX, Tool, ToolExecutionState } from "../lib/tool_types";
 import { RunShellCommandTool } from "../lib/run_shell_command.tool";
 import { CancelCommandTool } from "../lib/cancel_command.tool";
 import { TerminalContextService } from "../services/terminal_context.service";
 import { AIAgentMemoryService } from "../services/ai_agent_memory.service";
 import { AskUserTool } from "../lib/ask_user.tool";
+import { WebSearchTool } from "../lib/web_search.tool";
+import { WebFetchTool } from "../lib/web_fetch.tool";
+import { DeepSearchTool } from "../lib/deep_search.tool";
+import {
+  DEFAULT_DEEP_SEARCH_PAGES,
+  DEFAULT_WEB_CHAR_LIMIT,
+  DEFAULT_WEB_SEARCH_RESULTS,
+  DEFAULT_WEB_TIMEOUT_MS,
+  WebToolsConfig,
+} from "../lib/web_client";
+import webToolsSystemPrompt from "../prompts/web_tools_system_prompt.md";
+import {
+  DEFAULT_PANEL_THEME_ID,
+  PANEL_THEMES,
+  PanelTheme,
+  findPanelTheme,
+  isPanelThemeId,
+} from "../lib/panel_themes";
+import { wrapCodeForClipboard } from "../lib/markdown_renderer";
+import { agentLog } from "../lib/debug_log";
+import { createZip } from "../lib/zip";
+import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
 import {
   detectOsName,
   detectShellFromProcess,
@@ -35,12 +60,16 @@ import {
   formatTokens,
 } from "../lib/context_usage";
 import {
-  CUSTOM_PRESET_ID,
   ReasoningEffort,
   isReasoningEffort,
   mergeReasoningParameters,
   resolveReasoningStyle,
 } from "../lib/model_presets";
+import {
+  DEFAULT_PROVIDER_ID,
+  cloneProviders,
+  findProvider,
+} from "../lib/providers";
 import { fetchContextWindow } from "../lib/llm_endpoint";
 import { applyLocalRequestDefaults } from "../lib/request_defaults";
 import {
@@ -186,14 +215,29 @@ export class AIPanelComponent implements OnInit, AfterViewInit, OnDestroy {
     private terminalContext: TerminalContextService,
     private hotkeys: HotkeysService,
     private memoryService: AIAgentMemoryService,
+    private host: ElementRef<HTMLElement>,
   ) {}
+
+  /** Доступные темы панели (расширяется в lib/panel_themes). */
+  readonly panelThemes: PanelTheme[] = PANEL_THEMES;
+  themeMenuOpen = false;
+  /** id сообщения, для которого только что показали «Скопировано» (Markdown). */
+  copiedMessageId: string | null = null;
+  /** id сообщения, для которого только что скопировали обычный текст. */
+  copiedTextMessageId: string | null = null;
+  /** CSS-переменные, выставленные предыдущей темой — чтобы вернуть их при смене. */
+  private appliedThemeVars: string[] = [];
+  /** Кэш Electron-clipboard (самый надёжный путь копирования в рендерере). */
+  private electronClipboard: { writeText(text: string): void } | null | undefined =
+    undefined;
 
   ngOnInit(): void {
     this.config.store.aiAgent ??= {};
+    this.ensureProviders();
     this.config.store.aiAgent.llmEndpoint ??= "";
     this.config.store.aiAgent.apiToken ??= "";
     this.config.store.aiAgent.model ??= "default";
-    this.config.store.aiAgent.modelPreset ??= CUSTOM_PRESET_ID;
+    this.applyActiveProviderIfNeeded();
     if (!isReasoningEffort(this.config.store.aiAgent.reasoningEffort)) {
       this.config.store.aiAgent.reasoningEffort = "off";
     }
@@ -211,6 +255,15 @@ export class AIPanelComponent implements OnInit, AfterViewInit, OnDestroy {
     this.config.store.aiAgent.memoryEmbeddingEndpoint ??= "http://127.0.0.1:8082";
     this.config.store.aiAgent.memoryEmbeddingModel ??= "Kibborg_Embed_v1";
     this.config.store.aiAgent.memoryEmbeddingDimensions ??= 0;
+    this.config.store.aiAgent.webSearchEnabled ??= false;
+    this.config.store.aiAgent.deepSearchEnabled ??= false;
+    this.config.store.aiAgent.webSearchMaxResults ??= DEFAULT_WEB_SEARCH_RESULTS;
+    this.config.store.aiAgent.deepSearchMaxPages ??= DEFAULT_DEEP_SEARCH_PAGES;
+    this.config.store.aiAgent.webSearchTimeoutMs ??= DEFAULT_WEB_TIMEOUT_MS;
+    this.config.store.aiAgent.webFetchCharLimit ??= DEFAULT_WEB_CHAR_LIMIT;
+    if (!isPanelThemeId(this.config.store.aiAgent.panelTheme)) {
+      this.config.store.aiAgent.panelTheme = DEFAULT_PANEL_THEME_ID;
+    }
     this.config.store.aiAgent.contextWindowTokens ??=
       DEFAULT_CONTEXT_WINDOW_TOKENS;
     this.contextWindowTokens = Math.max(
@@ -222,6 +275,7 @@ export class AIPanelComponent implements OnInit, AfterViewInit, OnDestroy {
     this.settingsSignature = this.currentSettingsSignature();
     this.refreshContextUsage();
     this.applyMemoryConfig();
+    this.applyPanelTheme();
     void this.updateMemoryEnvironment();
     void this.autodetectContextWindow();
     this.hotkeySubscription = this.hotkeys.hotkey$.subscribe((hotkey) => {
@@ -231,6 +285,7 @@ export class AIPanelComponent implements OnInit, AfterViewInit, OnDestroy {
     });
     this.configSubscription = this.config.changed$.subscribe(() => {
       this.applyMemoryConfig();
+      this.applyPanelTheme();
       this.applySettingsChange();
     });
   }
@@ -431,6 +486,10 @@ export class AIPanelComponent implements OnInit, AfterViewInit, OnDestroy {
         this.markActiveToolCallsStopped();
       } else {
         this.lastError = error instanceof Error ? error.message : String(error);
+        agentLog("turn_error", {
+          message: this.lastError,
+          stack: error instanceof Error ? error.stack : undefined,
+        });
         this.clearStreamingDrafts();
       }
     } finally {
@@ -1043,6 +1102,10 @@ export class AIPanelComponent implements OnInit, AfterViewInit, OnDestroy {
     return toolCall.id;
   }
 
+  trackTheme(_index: number, theme: PanelTheme): string {
+    return theme.id;
+  }
+
   toggleMessageCollapsed(messageId: string): void {
     this.messages = this.messages.map((message) =>
       message.id === messageId
@@ -1090,14 +1153,33 @@ export class AIPanelComponent implements OnInit, AfterViewInit, OnDestroy {
       return;
     }
 
-    this.sessionTools = [
+    const tools: Tool[] = [
       new GetTerminalLinesTool(this.frontend, this.terminalContext),
       new RunShellCommandTool(this.terminal, this.terminalContext),
       new CancelCommandTool(this.terminal),
+    ];
+
+    const webConfig: WebToolsConfig = {
+      maxResults: () => this.getWebSearchMaxResults(),
+      maxPages: () => this.getDeepSearchMaxPages(),
+      timeoutMs: () => this.getWebSearchTimeoutMs(),
+      charLimit: () => this.getWebFetchCharLimit(),
+    };
+    if (this.deepSearchEnabled) {
+      tools.push(new DeepSearchTool(webConfig));
+    }
+    if (this.webSearchEnabled || this.deepSearchEnabled) {
+      tools.push(new WebFetchTool(webConfig));
+    }
+    if (this.webSearchEnabled) {
+      tools.push(new WebSearchTool(webConfig));
+    }
+    tools.push(
       new AskUserTool((toolCallId, args, signal) =>
         this.requestUserAnswer(toolCallId, args, signal),
       ),
-    ];
+    );
+    this.sessionTools = tools;
 
     // Каждая панель ведёт собственную сессионную память: иначе goal/attempts двух
     // вкладок смешивались, а окружение одной панели переписывало окружение другой.
@@ -1106,7 +1188,7 @@ export class AIPanelComponent implements OnInit, AfterViewInit, OnDestroy {
 
     this.chatSession = new LLMChatSession(
       endpoint,
-      buildSystemPrompt(this.getAdditionalSystemPrompt()),
+      buildSystemPrompt(this.buildAdditionalSystemPrompt()),
       this.sessionTools,
       this.getApiToken(),
       this.getModel(),
@@ -1164,6 +1246,8 @@ export class AIPanelComponent implements OnInit, AfterViewInit, OnDestroy {
       this.getApiToken(),
       this.getReasoningEffort(),
       this.getAdditionalRequestParameters(),
+      this.webSearchEnabled,
+      this.deepSearchEnabled,
     ]);
   }
 
@@ -1188,6 +1272,42 @@ export class AIPanelComponent implements OnInit, AfterViewInit, OnDestroy {
 
   private getEndpoint(): string {
     return this.config.store.aiAgent?.llmEndpoint?.trim?.() ?? "";
+  }
+
+  /** Заводит список провайдеров и активного провайдера, если их ещё нет. */
+  private ensureProviders(): void {
+    const aiAgent = this.config.store.aiAgent;
+    if (!Array.isArray(aiAgent.providers)) {
+      aiAgent.providers = cloneProviders();
+    }
+    if (typeof aiAgent.activeProviderId !== "string") {
+      aiAgent.activeProviderId = DEFAULT_PROVIDER_ID;
+    }
+    const active = findProvider(aiAgent.providers, aiAgent.activeProviderId);
+    if (!active) {
+      aiAgent.activeProviderId = aiAgent.providers[0]?.id ?? "";
+    }
+  }
+
+  /**
+   * Если активный провайдер задан, а эффективные поля пусты (свежий конфиг),
+   * подставляем его endpoint/model/token.
+   */
+  private applyActiveProviderIfNeeded(): void {
+    const aiAgent = this.config.store.aiAgent;
+    const provider = findProvider(aiAgent.providers, aiAgent.activeProviderId);
+    if (!provider) {
+      return;
+    }
+    if (!aiAgent.llmEndpoint) {
+      aiAgent.llmEndpoint = provider.endpoint;
+    }
+    if (!aiAgent.apiToken) {
+      aiAgent.apiToken = provider.apiToken;
+    }
+    if (!aiAgent.model || aiAgent.model === "default") {
+      aiAgent.model = provider.model;
+    }
   }
 
   /**
@@ -1251,11 +1371,7 @@ export class AIPanelComponent implements OnInit, AfterViewInit, OnDestroy {
     const params = this.config.store.aiAgent?.additionalRequestParameters;
     const base = this.isPlainObject(params) ? params : {};
     const endpoint = this.getEndpoint();
-    const style = resolveReasoningStyle(
-      endpoint,
-      this.getModel(),
-      this.config.store.aiAgent?.modelPreset,
-    );
+    const style = resolveReasoningStyle(endpoint, this.getModel());
     const merged = mergeReasoningParameters(base, style, this.getReasoningEffort());
     // Local policy last: it strips switches the gateway cannot forward, removes
     // "unlimited thinking" budgets and fills in the sampling parameters the
@@ -1278,6 +1394,481 @@ export class AIPanelComponent implements OnInit, AfterViewInit, OnDestroy {
 
   private getAdditionalSystemPrompt(): string {
     return this.config.store.aiAgent?.additionalSystemPrompt?.trim?.() ?? "";
+  }
+
+  /**
+   * Дополнительный промпт = пользовательский + правила интернет-инструментов,
+   * когда они включены. Стиль ответа добавляет `buildSystemPrompt` поверх.
+   */
+  private buildAdditionalSystemPrompt(): string {
+    const parts: string[] = [];
+    const userPrompt = this.getAdditionalSystemPrompt();
+    if (userPrompt) {
+      parts.push(userPrompt);
+    }
+    if (this.webSearchEnabled || this.deepSearchEnabled) {
+      const webPrompt = String(webToolsSystemPrompt ?? "").trim();
+      if (webPrompt) {
+        parts.push(webPrompt);
+      }
+    }
+    return parts.join("\n\n");
+  }
+
+  get webSearchEnabled(): boolean {
+    return !!this.config.store.aiAgent?.webSearchEnabled;
+  }
+
+  get deepSearchEnabled(): boolean {
+    return !!this.config.store.aiAgent?.deepSearchEnabled;
+  }
+
+  private clampNumber(value: unknown, fallback: number, min: number, max: number): number {
+    const parsed = typeof value === "number" ? value : Number(value);
+    const base = Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+    return Math.max(min, Math.min(max, Math.floor(base)));
+  }
+
+  getWebSearchMaxResults(): number {
+    return this.clampNumber(
+      this.config.store.aiAgent?.webSearchMaxResults,
+      DEFAULT_WEB_SEARCH_RESULTS,
+      1,
+      15,
+    );
+  }
+
+  getDeepSearchMaxPages(): number {
+    return this.clampNumber(
+      this.config.store.aiAgent?.deepSearchMaxPages,
+      DEFAULT_DEEP_SEARCH_PAGES,
+      1,
+      10,
+    );
+  }
+
+  getWebSearchTimeoutMs(): number {
+    return this.clampNumber(
+      this.config.store.aiAgent?.webSearchTimeoutMs,
+      DEFAULT_WEB_TIMEOUT_MS,
+      1000,
+      60000,
+    );
+  }
+
+  getWebFetchCharLimit(): number {
+    return this.clampNumber(
+      this.config.store.aiAgent?.webFetchCharLimit,
+      DEFAULT_WEB_CHAR_LIMIT,
+      500,
+      20000,
+    );
+  }
+
+  /** Включить/выключить быстрый веб-поиск; сессия пересобирается с новыми тулами. */
+  async toggleWebSearch(): Promise<void> {
+    const next = !this.webSearchEnabled;
+    this.config.store.aiAgent.webSearchEnabled = next;
+    this.addSystemNotice(
+      next
+        ? "Веб-поиск включён: агенту доступен инструмент web_search."
+        : "Веб-поиск выключен.",
+    );
+    await this.config.save();
+    this.applySettingsChange();
+  }
+
+  /** Включить/выключить глубокий ресёрч (deep_search + web_fetch). */
+  async toggleDeepSearch(): Promise<void> {
+    const next = !this.deepSearchEnabled;
+    this.config.store.aiAgent.deepSearchEnabled = next;
+    this.addSystemNotice(
+      next
+        ? "Глубокий поиск включён: агенту доступны deep_search и web_fetch."
+        : "Глубокий поиск выключен.",
+    );
+    await this.config.save();
+    this.applySettingsChange();
+  }
+
+  // ---------------------------------------------------------------
+  // Тема панели
+  // ---------------------------------------------------------------
+
+  get currentThemeId(): string {
+    const id = this.config.store.aiAgent?.panelTheme;
+    return isPanelThemeId(id) ? id : DEFAULT_PANEL_THEME_ID;
+  }
+
+  get currentTheme(): PanelTheme {
+    return findPanelTheme(this.currentThemeId);
+  }
+
+  /** Применяет выбранную тему: CSS-переменные + класс структурного режима. */
+  applyPanelTheme(): void {
+    const el = this.host?.nativeElement;
+    if (!el) {
+      return;
+    }
+    for (const key of this.appliedThemeVars) {
+      el.style.removeProperty(key);
+    }
+    this.appliedThemeVars = [];
+
+    const theme = this.currentTheme;
+    for (const [key, value] of Object.entries(theme.vars)) {
+      el.style.setProperty(key, value);
+      this.appliedThemeVars.push(key);
+    }
+    el.classList.toggle("mode-log", theme.mode === "log");
+    el.classList.toggle("mode-cards", theme.mode !== "log");
+  }
+
+  toggleThemeMenu(event?: Event): void {
+    event?.stopPropagation();
+    this.themeMenuOpen = !this.themeMenuOpen;
+  }
+
+  async selectTheme(id: string): Promise<void> {
+    if (!isPanelThemeId(id)) {
+      return;
+    }
+    this.themeMenuOpen = false;
+    this.config.store.aiAgent.panelTheme = id;
+    this.applyPanelTheme();
+    await this.config.save();
+  }
+
+  onPanelClick(event: MouseEvent): void {
+    event.stopPropagation();
+    const target = event.target as HTMLElement | null;
+    if (!target?.closest?.(".theme-picker")) {
+      this.themeMenuOpen = false;
+    }
+  }
+
+  @HostListener("document:click")
+  onDocumentClick(): void {
+    this.themeMenuOpen = false;
+  }
+
+  // ---------------------------------------------------------------
+  // Копирование
+  // ---------------------------------------------------------------
+
+  /**
+   * Electron clipboard из рендерера — самый надёжный путь (writeText браузерного
+   * Clipboard API в Electron иногда молча отклоняется без фокуса документа).
+   */
+  private getElectronClipboard(): { writeText(text: string): void } | null {
+    if (this.electronClipboard !== undefined) {
+      return this.electronClipboard;
+    }
+    let resolved: { writeText(text: string): void } | null = null;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const electron = require("electron");
+      resolved = electron?.clipboard ?? null;
+    } catch {
+      resolved = null;
+    }
+    this.electronClipboard = resolved;
+    return resolved;
+  }
+
+  async copyToClipboard(text: string): Promise<boolean> {
+    if (!text) {
+      return false;
+    }
+
+    const electronClipboard = this.getElectronClipboard();
+    if (electronClipboard?.writeText) {
+      try {
+        electronClipboard.writeText(text);
+        return true;
+      } catch {
+        // переходим к браузерному способу
+      }
+    }
+
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch {
+      // переходим к запасному способу
+    }
+    try {
+      const textarea = document.createElement("textarea");
+      textarea.value = text;
+      textarea.style.position = "fixed";
+      textarea.style.top = "-1000px";
+      textarea.style.opacity = "0";
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      const ok = document.execCommand("copy");
+      textarea.remove();
+      return ok;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Копирует исходный Markdown ответа ассистента (с ```-фенсами и таблицами). */
+  async copyAssistantMarkdown(message: ChatMessageViewModel): Promise<void> {
+    const ok = await this.copyToClipboard(message.content ?? "");
+    if (ok) {
+      this.copiedMessageId = message.id;
+      setTimeout(() => {
+        if (this.copiedMessageId === message.id) {
+          this.copiedMessageId = null;
+        }
+      }, 1200);
+    }
+  }
+
+  /** Копирует ответ ассистента как обычный текст (без разметки Markdown). */
+  async copyAssistantText(message: ChatMessageViewModel): Promise<void> {
+    const root = this.host?.nativeElement?.querySelector(
+      `.message[data-message-id="${message.id}"] .markdown-content`,
+    ) as HTMLElement | null;
+    const text = root?.innerText?.trim() || stripMarkdown(message.content ?? "");
+    const ok = await this.copyToClipboard(text);
+    if (ok) {
+      this.copiedTextMessageId = message.id;
+      setTimeout(() => {
+        if (this.copiedTextMessageId === message.id) {
+          this.copiedTextMessageId = null;
+        }
+      }, 1200);
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // Экспорт сессии в ZIP
+  // ---------------------------------------------------------------
+
+  private getElectronDialog(): {
+    showSaveDialog(options: any): Promise<any>;
+  } | null {
+    try {
+      const remote = require("@electron/remote");
+      if (remote?.dialog?.showSaveDialog) {
+        return remote.dialog;
+      }
+    } catch {
+      // нет @electron/remote
+    }
+    try {
+      const electron = require("electron");
+      if (electron?.dialog?.showSaveDialog) {
+        return electron.dialog;
+      }
+    } catch {
+      // нет electron
+    }
+    return null;
+  }
+
+  /** Сохраняет всю историю сессии в ZIP (session.json + session.md). */
+  async exportSession(): Promise<void> {
+    try {
+      const history = this.chatSession?.getHistory() ?? [];
+      const toolCalls = this.toolCalls.map((toolCall) => ({
+        id: toolCall.id,
+        name: toolCall.name,
+        status: toolCall.status,
+        args: toolCall.args,
+        command: toolCall.command,
+        riskLevel: toolCall.riskLevel,
+        explanation: toolCall.explanation,
+        question: toolCall.question,
+        choices: toolCall.choices,
+        output: toolCall.output,
+        errorMessage: toolCall.errorMessage,
+      }));
+
+      const entries = this.messages.map((message) => ({
+        id: message.id,
+        role: message.role,
+        content: message.content,
+        streaming: message.streaming,
+        toolCallIds: message.toolCallIds ?? [],
+        images: message.images?.length ? message.images.length : 0,
+      }));
+
+      const payload = {
+        exportedAt: new Date().toISOString(),
+        plugin: "tabby-ai-agent",
+        model: this.getModel(),
+        endpoint: this.getEndpoint(),
+        panelTheme: this.currentThemeId,
+        messageCount: this.messages.length,
+        toolCallCount: toolCalls.length,
+        messages: entries,
+        toolCalls,
+        history,
+      };
+
+      const json = JSON.stringify(payload, null, 2);
+      const markdown = this.buildSessionMarkdown(payload);
+      const archive = createZip([
+        { name: "session.json", content: json },
+        { name: "session.md", content: markdown },
+      ]);
+
+      const stamp = new Date()
+        .toISOString()
+        .replace(/[:.]/g, "-")
+        .replace("T", "_")
+        .slice(0, 19);
+      const filename = `tabby-ai-agent-session-${stamp}.zip`;
+      const dir = path.join(os.homedir(), ".tabby-ai-agent", "sessions");
+      fs.mkdirSync(dir, { recursive: true });
+      const defaultPath = path.join(dir, filename);
+
+      const chosen = await this.pickExportPath(defaultPath);
+      if (chosen === null) {
+        return;
+      }
+      const target = chosen || defaultPath;
+      fs.writeFileSync(target, archive);
+      agentLog("session_exported", {
+        path: target,
+        bytes: archive.length,
+        messages: this.messages.length,
+      });
+      this.addSystemNotice(
+        `Сессия сохранена в ZIP: ${target} (${Math.max(1, Math.round(archive.length / 1024))} КБ)`,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.lastError = `Не удалось сохранить сессию: ${message}`;
+      agentLog("session_export_error", { message });
+    }
+  }
+
+  private async pickExportPath(defaultPath: string): Promise<string | null> {
+    const dialog = this.getElectronDialog();
+    if (!dialog) {
+      return defaultPath;
+    }
+    try {
+      const result = await dialog.showSaveDialog({
+        title: "Сохранить сессию AI-агента",
+        defaultPath,
+        filters: [{ name: "ZIP archive", extensions: ["zip"] }],
+      });
+      if (!result || result.canceled) {
+        return null;
+      }
+      return result.filePath || defaultPath;
+    } catch {
+      return defaultPath;
+    }
+  }
+
+  private buildSessionMarkdown(payload: {
+    exportedAt: string;
+    model: string;
+    endpoint: string;
+    panelTheme: string;
+    messages: Array<{ role: string; content: string }>;
+    toolCalls: Array<{ id: string; name: string; status: string; output: string | null; errorMessage: string | null }>;
+  }): string {
+    const lines: string[] = [
+      "# AI Agent — история сессии",
+      "",
+      `- Экспортировано: ${payload.exportedAt}`,
+      `- Модель: ${payload.model || "—"}`,
+      `- Endpoint: ${payload.endpoint || "—"}`,
+      `- Тема панели: ${payload.panelTheme}`,
+      `- Сообщений: ${payload.messages.length}`,
+      "",
+      "---",
+      "",
+    ];
+    for (const message of payload.messages) {
+      const title =
+        message.role === "user"
+          ? "## Вы"
+          : message.role === "assistant"
+            ? "## Агент"
+            : message.role === "reasoning"
+              ? "## Размышления"
+              : message.role === "tool"
+                ? "## Результат инструмента"
+                : "## Система";
+      lines.push(title, "", message.content || "_пусто_", "");
+      lines.push("---", "");
+    }
+    if (payload.toolCalls.length) {
+      lines.push("# Инструменты", "");
+      for (const toolCall of payload.toolCalls) {
+        lines.push(`## ${toolCall.name} — ${toolCall.status}`, "");
+        if (toolCall.output) {
+          lines.push("```text", toolCall.output, "```", "");
+        }
+        if (toolCall.errorMessage) {
+          lines.push(`Ошибка: ${toolCall.errorMessage}`, "");
+        }
+        lines.push("---", "");
+      }
+    }
+    return lines.join("\n");
+  }
+
+  /**
+   * Делегирование кликов в ленте: кнопка у блока кода копирует код, обёрнутый в
+   * тройные кавычки; клик по карточке ответа — копирует весь ответ.
+   */
+  onMessagesClick(event: MouseEvent): void {
+    const target = event.target as HTMLElement | null;
+    if (!target) {
+      return;
+    }
+
+    const codeCopy = target.closest(".code-copy") as HTMLElement | null;
+    if (codeCopy) {
+      const figure = codeCopy.closest(".codeblock");
+      const code = figure?.querySelector("code");
+      if (code) {
+        event.preventDefault();
+        event.stopPropagation();
+        void this.copyToClipboard(
+          wrapCodeForClipboard(code.textContent ?? ""),
+        ).then((ok) => this.flashCopyButton(codeCopy, ok));
+      }
+      return;
+    }
+
+    const messageEl = target.closest(".message.assistant") as HTMLElement | null;
+    if (
+      messageEl &&
+      !target.closest(
+        "a, button, input, textarea, .codeblock, .tool-call-card, .ask-user-card",
+      ) &&
+      !(window.getSelection()?.toString() ?? "")
+    ) {
+      const id = messageEl.getAttribute("data-message-id");
+      const message = id ? this.messages.find((item) => item.id === id) : undefined;
+      if (message) {
+        void this.copyAssistantMarkdown(message);
+      }
+    }
+  }
+
+  private flashCopyButton(button: HTMLElement, ok: boolean): void {
+    const original = button.getAttribute("data-label") ?? button.textContent ?? "Копировать";
+    button.setAttribute("data-label", original);
+    button.textContent = ok ? "Скопировано" : "Ошибка";
+    button.classList.toggle("copied", ok);
+    setTimeout(() => {
+      button.textContent = original;
+      button.classList.remove("copied");
+    }, 1200);
   }
 
   private appendStreamingToken(
@@ -1451,7 +2042,23 @@ export class AIPanelComponent implements OnInit, AfterViewInit, OnDestroy {
     return toolCall;
   }
 
+  /** Веб-инструменты отдают Markdown — в панели его рендерим, а не показываем `<pre>`. */
+  isRichToolOutput(toolCall: ToolCallViewModel): boolean {
+    return (
+      toolCall.name === "web_search" ||
+      toolCall.name === "web_fetch" ||
+      toolCall.name === "deep_search"
+    );
+  }
+
   private getToolExecutionState(output: string): ToolExecutionState | null {
+    if (output.startsWith(TOOL_PROGRESS_PREFIX)) {
+      return {
+        status: "executing",
+        output,
+      };
+    }
+
     if (
       output === "Команда одобрена. Отправка в терминал..." ||
       output === "Ввод терминала получен. Ожидание завершения команды..."
@@ -1918,4 +2525,27 @@ export class AIPanelComponent implements OnInit, AfterViewInit, OnDestroy {
       streaming: false,
     });
   }
+}
+
+
+/** Markdown → обычный текст (для кнопки «Текст»). */
+function stripMarkdown(input: string): string {
+  return String(input ?? "")
+    .replace(/```[^\n]*\n([\s\S]*?)```/g, "$1")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, "")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/^\s{0,3}#{1,6}\s+/gm, "")
+    .replace(/^\s{0,3}>\s?/gm, "")
+    .replace(/^\s*[-*+]\s+/gm, "")
+    .replace(/^\s*\d+\.\s+/gm, "")
+    .replace(/(\*\*|__)(.*?)\1/g, "$2")
+    .replace(/~~(.*?)~~/g, "$1")
+    .replace(/(\*|_)(.*?)\1/g, "$2")
+    .replace(/^\s*\|(.*)\|\s*$/gm, (_m, row: string) =>
+      row.split("|").map((cell) => cell.trim()).filter(Boolean).join("  "),
+    )
+    .replace(/^\s*[-:| ]{3,}\s*$/gm, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }

@@ -17,6 +17,20 @@ assert.equal(isKibborgEndpoint("http://kibborg.local:1234"), true);
 assert.equal(isKibborgEndpoint("https://api.deepseek.com"), false);
 assert.equal(isKibborgEndpoint("https://api.openai.com:443"), false);
 assert.equal(isKibborgEndpoint(""), false);
+// The gateway path is spelled "kiborg" (single b) — it must still be recognised.
+assert.equal(isKibborgEndpoint("https://gateway.example.com/mcp/kiborg"), true);
+assert.equal(isKibborgEndpoint("https://example.com/mcp/anything"), true);
+
+// Remote Kibborg gateway (single-b path): the sampling defaults must be applied.
+const remoteGateway = applyLocalRequestDefaults(
+  undefined,
+  "https://gateway.example.com/mcp/kiborg",
+  "gateway",
+);
+assert.equal(remoteGateway.temperature, KIBBORG_SAMPLING_DEFAULTS.temperature);
+assert.equal(remoteGateway.max_tokens, KIBBORG_SAMPLING_DEFAULTS.max_tokens);
+assert.equal(remoteGateway.presence_penalty, KIBBORG_SAMPLING_DEFAULTS.presence_penalty);
+assert.equal(remoteGateway.repeat_penalty, KIBBORG_SAMPLING_DEFAULTS.repeat_penalty);
 
 // ------------------------------------------------------------------- strip
 assert.deepEqual(
@@ -52,7 +66,7 @@ assert.equal(viaGateway.top_k, 40);
 assert.equal(viaGateway.presence_penalty, KIBBORG_SAMPLING_DEFAULTS.presence_penalty);
 assert.equal(viaGateway.frequency_penalty, KIBBORG_SAMPLING_DEFAULTS.frequency_penalty);
 assert.equal(viaGateway.repeat_penalty, KIBBORG_SAMPLING_DEFAULTS.repeat_penalty);
-assert.equal(viaGateway.max_tokens, 2048);
+assert.equal(viaGateway.max_tokens, KIBBORG_SAMPLING_DEFAULTS.max_tokens);
 
 // -------------------------------------------- direct brain: thinking allowed
 const direct = applyLocalRequestDefaults(
@@ -72,7 +86,7 @@ assert.equal(
 );
 assert.equal(direct.temperature, 0.5);
 assert.equal(direct.top_p, KIBBORG_SAMPLING_DEFAULTS.top_p);
-assert.equal(direct.max_tokens, 2048);
+assert.equal(direct.max_tokens, KIBBORG_SAMPLING_DEFAULTS.max_tokens);
 
 // ---------------------------------------------------- thinking needs room
 // (measured: budget 2048 with max_tokens 2048 cut a planning task off empty)
@@ -90,7 +104,7 @@ const thinking = applyLocalRequestDefaults(
 assert.equal(thinking.thinking_budget_tokens, 2048, "an explicit budget is kept");
 assert.equal(
   thinking.max_tokens,
-  2048 + THINKING_ANSWER_RESERVE_TOKENS,
+  Math.max(2048 + THINKING_ANSWER_RESERVE_TOKENS, KIBBORG_SAMPLING_DEFAULTS.max_tokens),
   "max_tokens must cover the thinking budget plus the answer reserve",
 );
 
@@ -105,7 +119,13 @@ const maxed = applyLocalRequestDefaults(
   "llamacpp",
 );
 assert.equal(maxed.thinking_budget_tokens, LOCAL_THINKING_BUDGET_LIMIT);
-assert.equal(maxed.max_tokens, LOCAL_THINKING_BUDGET_LIMIT + THINKING_ANSWER_RESERVE_TOKENS);
+assert.equal(
+  maxed.max_tokens,
+  Math.max(
+    LOCAL_THINKING_BUDGET_LIMIT + THINKING_ANSWER_RESERVE_TOKENS,
+    KIBBORG_SAMPLING_DEFAULTS.max_tokens,
+  ),
+);
 
 // ------------------------------------------------------------------ loops
 const looped = [
@@ -154,7 +174,7 @@ const noThinking = applyLocalRequestDefaults(
   "http://127.0.0.1:8093",
   "llamacpp",
 );
-assert.equal(noThinking.max_tokens, 2048);
+assert.equal(noThinking.max_tokens, KIBBORG_SAMPLING_DEFAULTS.max_tokens);
 
 // --------------------------------------------- cloud endpoints stay untouched
 const cloud = applyLocalRequestDefaults(

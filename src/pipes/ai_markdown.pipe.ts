@@ -1,32 +1,20 @@
 import { Pipe, PipeTransform } from "@angular/core";
 import { DomSanitizer, SafeHtml } from "@angular/platform-browser";
-import { marked } from "marked";
+import { escapeHtml, renderMarkdown } from "../lib/markdown_renderer";
 
 @Pipe({
   name: "aiMarkdown",
 })
 export class AIMarkdownPipe implements PipeTransform {
-  constructor(private sanitizer: DomSanitizer) {
-    marked.setOptions({
-      gfm: true,
-      breaks: true,
-    });
-  }
+  constructor(private sanitizer: DomSanitizer) {}
 
-  transform(content: string): SafeHtml {
+  transform(content: string | null | undefined): SafeHtml {
     if (!content) return "";
     try {
-      const html = marked.parse(content, { async: false }) as string;
-      return this.sanitizer.bypassSecurityTrustHtml(html);
+      return this.sanitizer.bypassSecurityTrustHtml(renderMarkdown(content));
     } catch (error) {
       console.error("Markdown parsing error:", error);
-      return this.escapeHtml(content);
+      return this.sanitizer.bypassSecurityTrustHtml(escapeHtml(content));
     }
-  }
-
-  private escapeHtml(text: string): string {
-    const div = document.createElement("div");
-    div.textContent = text;
-    return div.innerHTML;
   }
 }

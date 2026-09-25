@@ -43,8 +43,14 @@ export const KIBBORG_SAMPLING_DEFAULTS: Record<string, number> = {
   presence_penalty: 1.5,
   repeat_penalty: 1.05,
   frequency_penalty: 0.2,
-  /** Matches `LLM_MAX_TOKENS` in engine-go/settings.ini. */
-  max_tokens: 2048,
+  /**
+   * Ceiling for a single generated response. Not a step/turn limit: the agent may
+   * take as many tool rounds as it needs. This only bounds one stream so a
+   * pathological single generation cannot run away; the real ceiling is the
+   * context window. Set generously (thinking off answers are short, but the
+   * model is a reasoning model when thinking is enabled).
+   */
+  max_tokens: 16384,
 };
 
 /** Keys that make the model "think"; they must not survive a gateway hop. */
@@ -62,7 +68,14 @@ export function isKibborgEndpoint(endpoint: string): boolean {
   if (!value) {
     return false;
   }
-  if (value.includes("kibborg")) {
+  // The model name is "Kibborg" (double b) but the gateway path is "/mcp/kiborg"
+  // (single b): accept both spellings, otherwise the endpoint is not recognised
+  // and the sampling defaults (temperature, repetition penalties, max_tokens)
+  // are silently skipped — the brain then runs on server defaults and rambles.
+  if (value.includes("kibborg") || value.includes("kiborg")) {
+    return true;
+  }
+  if (value.includes("/mcp/")) {
     return true;
   }
   const ports = value.match(/:(\d{4,5})\b/g) ?? [];
@@ -107,7 +120,7 @@ function dropUnlimitedBudget(params: Record<string, any>): void {
  *   the reserve has to be generous: the limit must cover the budget plus a full
  *   answer's worth of tokens.
  */
-export const THINKING_ANSWER_RESERVE_TOKENS = 4096;
+export const THINKING_ANSWER_RESERVE_TOKENS = 6144;
 
 /**
  * Upper bound for a thinking budget on the local brain.
@@ -181,7 +194,9 @@ export function applyLocalRequestDefaults(
   endpoint: string,
   style: string,
 ): Record<string, any> {
-  const device = isKibborgEndpoint(endpoint);
+  // Belt and suspenders: a resolved `gateway` dialect also implies the Kibborg
+  // gateway, even if the address spelling slips past `isKibborgEndpoint`.
+  const device = isKibborgEndpoint(endpoint) || style === "gateway";
 
   // The engine gateway does not forward reasoning switches to the brain
   // (`LLAMA_REASONING=off`), and a request that carries its own tools is proxied

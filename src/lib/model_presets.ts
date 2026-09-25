@@ -24,20 +24,6 @@ export type ReasoningEffort = "off" | "low" | "medium" | "high" | "max";
  */
 export type ReasoningStyle = "deepseek" | "llamacpp" | "gateway" | "none";
 
-export interface ModelPreset {
-  id: string;
-  label: string;
-  endpoint: string;
-  model: string;
-  contextWindowTokens: number;
-  reasoningStyle: ReasoningStyle;
-  requiresToken: boolean;
-  hint: string;
-}
-
-/** Id of the "type the endpoint and model yourself" pseudo-preset. */
-export const CUSTOM_PRESET_ID = "custom";
-
 /**
  * Reasoning levels offered in settings. `off` disables thinking where the
  * provider allows it; every other level is mapped per provider below.
@@ -51,79 +37,6 @@ export const REASONING_EFFORTS: ReadonlyArray<{
   { id: "medium", label: "Средний (medium)" },
   { id: "high", label: "Высокий (high)" },
   { id: "max", label: "Максимальный (max)" },
-];
-
-export const MODEL_PRESETS: ReadonlyArray<ModelPreset> = [
-  {
-    id: "kibborg",
-    label: "Kibborg_Flash_v5.7 — шлюз движка (127.0.0.1:8083)",
-    endpoint: "http://127.0.0.1:8083",
-    model: "Kibborg_Flash_v5.7",
-    contextWindowTokens: 262144,
-    reasoningStyle: "gateway",
-    requiresToken: false,
-    hint:
-      "Публичный вход движка Kibborg: сам поднимает помощников и инструменты, " +
-      "API-ключ не нужен. Уровень размышления шлюз не пробрасывает — для " +
-      "рассуждений выберите «kibborg-direct».",
-  },
-  {
-    id: "kibborg-direct",
-    label: "Kibborg_Flash_v5.7 — прямой мозг (127.0.0.1:8093)",
-    endpoint: "http://127.0.0.1:8093",
-    model: "Kibborg_Flash_v5.7",
-    contextWindowTokens: 262144,
-    reasoningStyle: "llamacpp",
-    requiresToken: false,
-    hint:
-      "Напрямую llama-server мозга (Ternary Bonsai 2 27B, окно 256K): живой " +
-      "поток токенов, работают зрение и «Размышления». Помощники движка при " +
-      "этом не задействуются — их зовёт только шлюз 8083.",
-  },
-  {
-    id: "kibborg-worker-smart",
-    label: "Kibborg_Worker_smart — помощник (127.0.0.1:8086)",
-    endpoint: "http://127.0.0.1:8086",
-    model: "Kibborg_Worker_smart",
-    contextWindowTokens: 40960,
-    reasoningStyle: "llamacpp",
-    requiresToken: false,
-    hint:
-      "Помощник Qwen3-4B на второй карте: разбор логов, кода, длинных текстов " +
-      "(окно 40K). Умеет вызов инструментов.",
-  },
-  {
-    id: "kibborg-worker-fast",
-    label: "Kibborg_Worker_fast — помощник (127.0.0.1:8084)",
-    endpoint: "http://127.0.0.1:8084",
-    model: "Kibborg_Worker_fast",
-    contextWindowTokens: 32768,
-    reasoningStyle: "llamacpp",
-    requiresToken: false,
-    hint:
-      "Быстрый помощник Qwen3-1.7B: классификация, извлечение, черновик JSON " +
-      "(окно 32K). Умеет вызов инструментов.",
-  },
-  {
-    id: "deepseek-flash",
-    label: "DeepSeek Flash — deepseek-flash (облако)",
-    endpoint: "https://api.deepseek.com",
-    model: "deepseek-flash",
-    contextWindowTokens: 1000000,
-    reasoningStyle: "deepseek",
-    requiresToken: true,
-    hint: "Облако DeepSeek: нужен API-ключ sk-… (platform.deepseek.com) в поле Bearer token.",
-  },
-  {
-    id: "deepseek-v4-pro",
-    label: "DeepSeek V4 Pro — deepseek-v4-pro (облако)",
-    endpoint: "https://api.deepseek.com",
-    model: "deepseek-v4-pro",
-    contextWindowTokens: 1000000,
-    reasoningStyle: "deepseek",
-    requiresToken: true,
-    hint: "Самая сильная модель DeepSeek: нужен API-ключ sk-… в поле Bearer token.",
-  },
 ];
 
 /** Per-level thinking budget (tokens) for llama.cpp-backed models. */
@@ -146,15 +59,6 @@ const DEEPSEEK_EFFORT_VALUES: Record<ReasoningEffort, string> = {
   max: "max",
 };
 
-export function findModelPreset(
-  id: string | null | undefined,
-): ModelPreset | undefined {
-  if (!id) {
-    return undefined;
-  }
-  return MODEL_PRESETS.find((preset) => preset.id === id);
-}
-
 export function isReasoningEffort(value: unknown): value is ReasoningEffort {
   return REASONING_EFFORTS.some((effort) => effort.id === value);
 }
@@ -167,29 +71,25 @@ export function isReasoningEffort(value: unknown): value is ReasoningEffort {
 export function resolveReasoningStyle(
   endpoint: string,
   model: string,
-  presetId?: string | null,
 ): ReasoningStyle {
-  const preset = findModelPreset(presetId);
-  if (preset) {
-    return preset.reasoningStyle;
-  }
-
   const haystack = `${endpoint} ${model}`.toLowerCase();
   if (haystack.includes("deepseek")) {
     return "deepseek";
   }
-  // The engine gateway occupies 8083 and swallows reasoning switches; the brain
-  // (8093) and the workers (8084-8086) are plain llama-server and honour them.
-  if (haystack.includes("8083")) {
-    return "gateway";
-  }
+  // Every Kibborg endpoint (local 8083 gateway, LAN, remote `/mcp/`, direct brain
+  // 8093, workers 8084-8086) speaks the llama.cpp dialect. Sending an explicit
+  // `enable_thinking` is the safe choice: an endpoint that ignores it behaves as
+  // before, while the remote gateway honours it (thinking off cut 127 s → 10 s).
   if (
+    haystack.includes("8083") ||
     haystack.includes("8093") ||
     haystack.includes("8084") ||
     haystack.includes("8085") ||
     haystack.includes("8086") ||
-    haystack.includes("llama") ||
-    haystack.includes("kibborg")
+    haystack.includes("/mcp/") ||
+    haystack.includes("kibborg") ||
+    haystack.includes("kiborg") ||
+    haystack.includes("llama")
   ) {
     return "llamacpp";
   }
@@ -270,22 +170,12 @@ export function describeReasoning(
   }
   if (style === "llamacpp") {
     if (effort === "off") {
-      return "chat_template_kwargs.enable_thinking = false — размышления выключены. Рекомендуемый режим для локального мозга.";
+      return "enable_thinking = false — размышления выключены. Рекомендуемый режим: ответ в разы быстрее.";
     }
     return (
-      `enable_thinking = true, thinking_budget_tokens = ${LLAMACPP_THINKING_BUDGETS[effort]} — ` +
-      "размышления работают только на прямом мозге (8093) и помощниках (8084/8086), через шлюз 8083 " +
-      "не пробрасываются. Замеры на одной и той же задаче: без размышлений 3 с и верная команда, " +
-      `с «${effort}» — ${effort === "low" ? "14" : "23"}+ с, ответ не точнее. ` +
-      "Плагин поднимет max_tokens до бюджета + 4096 и повторит запрос без размышлений, если ответ уйдёт в повтор."
-    );
-  }
-  if (style === "gateway") {
-    return (
-      "Ничего не отправляется: шлюз движка Kibborg (8083) не пробрасывает настройки " +
-      "размышления в мозг (в движке LLAMA_REASONING=off, включение thinking ломает " +
-      "JSON диспетчера). Чтобы размышления работали — выберите «kibborg-direct» (8093) " +
-      "или помощника (8084/8086)."
+      `enable_thinking = true, thinking_budget_tokens = ${LLAMACPP_THINKING_BUDGETS[effort]}. ` +
+      "На локальном мозге размышления заметно замедляют ответ и редко повышают точность — держите «Выключено», " +
+      "если не нужна особая глубина."
     );
   }
   return "Для этой модели уровень размышления не передаётся.";

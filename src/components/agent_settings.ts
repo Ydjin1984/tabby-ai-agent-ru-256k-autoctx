@@ -33,15 +33,25 @@ interface MemoryItemView {
 }
 import { normalizeOpenAIBaseUrl } from "../lib/llm_endpoint";
 import {
-  CUSTOM_PRESET_ID,
-  MODEL_PRESETS,
+  DEFAULT_PANEL_THEME_ID,
+  PANEL_THEMES,
+  PanelTheme,
+  isPanelThemeId,
+} from "../lib/panel_themes";
+import {
   REASONING_EFFORTS,
   ReasoningEffort,
   describeReasoning,
-  findModelPreset,
   isReasoningEffort,
   resolveReasoningStyle,
 } from "../lib/model_presets";
+import {
+  AIProviderConfig,
+  DEFAULT_PROVIDER_ID,
+  cloneProviders,
+  createProviderId,
+  findProvider,
+} from "../lib/providers";
 
 @Component({
   templateUrl: "./agent_settings.html",
@@ -50,12 +60,9 @@ import {
 export class AIAgentSettingsComponent implements OnInit {
   additionalSystemPrompt = "";
   @HostBinding("class.content-box") true;
-  apiToken = "";
-  model = "default";
-  modelPreset = CUSTOM_PRESET_ID;
+  providers: AIProviderConfig[] = [];
+  activeProviderId = DEFAULT_PROVIDER_ID;
   reasoningEffort: ReasoningEffort = "off";
-  readonly modelPresets = MODEL_PRESETS;
-  readonly customPresetId = CUSTOM_PRESET_ID;
   readonly reasoningEfforts = REASONING_EFFORTS;
   additionalRequestParametersText = "";
   additionalRequestParametersError: string | null = null;
@@ -96,12 +103,16 @@ export class AIAgentSettingsComponent implements OnInit {
   ];
   panelPosition: PanelPosition = "right";
   panelSizePercent = 40;
+  readonly panelThemes: PanelTheme[] = PANEL_THEMES;
+  panelTheme = DEFAULT_PANEL_THEME_ID;
+  webSearchEnabled = false;
+  deepSearchEnabled = false;
+  webSearchMaxResults = 6;
+  deepSearchMaxPages = 6;
+  webSearchTimeoutMs = 8000;
+  webFetchCharLimit = 4000;
   memoryEnabled = true;
   memoryRetrievalLimit = 6;
-  memoryEmbeddingProvider = "auto";
-  memoryEmbeddingEndpoint = "http://127.0.0.1:8082";
-  memoryEmbeddingModel = "Kibborg_Embed_v1";
-  memoryEmbeddingDimensions = 0;
   endpointCheckpointStatus:
     | "idle"
     | "checking"
@@ -118,10 +129,11 @@ export class AIAgentSettingsComponent implements OnInit {
 
   ngOnInit(): void {
     this.ensureConfigDefaults();
-    this.apiToken = this.config.store.aiAgent.apiToken;
-    this.model = this.config.store.aiAgent.model;
-    this.modelPreset =
-      this.config.store.aiAgent.modelPreset ?? CUSTOM_PRESET_ID;
+    this.providers = this.config.store.aiAgent.providers ?? [];
+    this.activeProviderId =
+      this.config.store.aiAgent.activeProviderId ??
+      this.providers[0]?.id ??
+      DEFAULT_PROVIDER_ID;
     this.reasoningEffort = isReasoningEffort(
       this.config.store.aiAgent.reasoningEffort,
     )
@@ -132,15 +144,17 @@ export class AIAgentSettingsComponent implements OnInit {
       this.config.store.aiAgent.additionalRequestParametersText;
     this.panelPosition = this.config.store.aiAgent.panelPosition ?? "right";
     this.panelSizePercent = this.config.store.aiAgent.panelSizePercent ?? 40;
+    this.panelTheme = isPanelThemeId(this.config.store.aiAgent.panelTheme)
+      ? this.config.store.aiAgent.panelTheme
+      : DEFAULT_PANEL_THEME_ID;
+    this.webSearchEnabled = this.config.store.aiAgent.webSearchEnabled === true;
+    this.deepSearchEnabled = this.config.store.aiAgent.deepSearchEnabled === true;
+    this.webSearchMaxResults = this.config.store.aiAgent.webSearchMaxResults ?? 6;
+    this.deepSearchMaxPages = this.config.store.aiAgent.deepSearchMaxPages ?? 6;
+    this.webSearchTimeoutMs = this.config.store.aiAgent.webSearchTimeoutMs ?? 8000;
+    this.webFetchCharLimit = this.config.store.aiAgent.webFetchCharLimit ?? 4000;
     this.memoryEnabled = this.config.store.aiAgent.memoryEnabled !== false;
     this.memoryRetrievalLimit = this.config.store.aiAgent.memoryRetrievalLimit ?? 6;
-    this.memoryEmbeddingProvider =
-      this.config.store.aiAgent.memoryEmbeddingProvider ?? "auto";
-    this.memoryEmbeddingEndpoint =
-      this.config.store.aiAgent.memoryEmbeddingEndpoint ?? "";
-    this.memoryEmbeddingModel = this.config.store.aiAgent.memoryEmbeddingModel ?? "";
-    this.memoryEmbeddingDimensions =
-      this.config.store.aiAgent.memoryEmbeddingDimensions ?? 0;
     this.autoApproveMaxRisk = isAutoApproveMaxRisk(
       this.config.store.aiAgent.autoApproveMaxRisk,
     )
@@ -149,46 +163,95 @@ export class AIAgentSettingsComponent implements OnInit {
     void this.refreshMemoryInspector();
   }
 
-  async saveLLMEndpoint(value: string): Promise<void> {
-    const endpoint = this.normalizeEndpoint(value);
-    this.config.store.aiAgent.llmEndpoint = endpoint;
-    await this.config.save();
+  // ---------------------------------------------------------------
+  // Провайдеры (у каждого — свой ключ)
+  // ---------------------------------------------------------------
+
+  get activeProvider(): AIProviderConfig | null {
+    return findProvider(this.providers, this.activeProviderId) ?? null;
   }
 
-  async saveApiToken(value: string): Promise<void> {
-    this.apiToken = value;
-    this.config.store.aiAgent.apiToken = value;
-    await this.config.save();
+  trackProvider(_index: number, provider: AIProviderConfig): string {
+    return provider.id;
   }
 
-  async saveModel(value: string): Promise<void> {
-    const model = value.trim() || "default";
-    this.model = model;
-    this.config.store.aiAgent.model = model;
-    await this.config.save();
-  }
-
-  /**
-   * Pick a provider/model preset: the endpoint and model id are written into
-   * the config so the rest of the plugin keeps reading one source of truth,
-   * and the endpoint is re-checked so the settings page shows the result.
-   */
-  async saveModelPreset(value: string): Promise<void> {
-    this.modelPreset = value;
-    this.config.store.aiAgent.modelPreset = value;
-
-    const preset = findModelPreset(value);
-    if (preset) {
-      this.config.store.aiAgent.llmEndpoint = preset.endpoint;
-      this.config.store.aiAgent.model = preset.model;
-      this.config.store.aiAgent.contextWindowTokens = preset.contextWindowTokens;
-      this.model = preset.model;
+  /** Активирует провайдера и применяет его endpoint/model/ключ к панели. */
+  async selectProvider(id: string): Promise<void> {
+    const provider = findProvider(this.providers, id);
+    if (!provider) {
+      return;
     }
-
-    await this.config.save();
-    if (preset) {
-      this.checkLLMEndpoint();
+    this.activeProviderId = provider.id;
+    const aiAgent = this.config.store.aiAgent;
+    aiAgent.activeProviderId = provider.id;
+    aiAgent.llmEndpoint = provider.endpoint;
+    aiAgent.model = provider.model || "default";
+    aiAgent.apiToken = provider.apiToken;
+    if (provider.contextWindowTokens) {
+      aiAgent.contextWindowTokens = provider.contextWindowTokens;
     }
+    await this.config.save();
+    this.checkLLMEndpoint();
+  }
+
+  async addProvider(): Promise<void> {
+    const id = createProviderId(this.providers);
+    const provider: AIProviderConfig = {
+      id,
+      label: "Новая модель",
+      endpoint: "",
+      model: "",
+      apiToken: "",
+    };
+    this.providers = [...this.providers, provider];
+    this.config.store.aiAgent.providers = this.providers;
+    await this.selectProvider(id);
+  }
+
+  async removeProvider(id: string): Promise<void> {
+    if (this.providers.length <= 1) {
+      return;
+    }
+    this.providers = this.providers.filter((provider) => provider.id !== id);
+    this.config.store.aiAgent.providers = this.providers;
+    if (this.activeProviderId === id) {
+      await this.selectProvider(this.providers[0].id);
+    } else {
+      await this.config.save();
+    }
+  }
+
+  /** Правка поля активного провайдера; активный сразу применяется к панели. */
+  async updateProviderField(
+    field: "label" | "endpoint" | "model" | "apiToken",
+    value: string,
+  ): Promise<void> {
+    const provider = this.activeProvider;
+    if (!provider) {
+      return;
+    }
+    if (field === "endpoint") {
+      provider.endpoint = this.normalizeEndpoint(value);
+    } else if (field === "model") {
+      provider.model = value.trim();
+    } else if (field === "label") {
+      provider.label = value;
+    } else {
+      provider.apiToken = value;
+    }
+    this.providers = [...this.providers];
+    const aiAgent = this.config.store.aiAgent;
+    aiAgent.providers = this.providers;
+    if (field === "endpoint") {
+      aiAgent.llmEndpoint = provider.endpoint;
+    }
+    if (field === "model") {
+      aiAgent.model = provider.model || "default";
+    }
+    if (field === "apiToken") {
+      aiAgent.apiToken = provider.apiToken;
+    }
+    await this.config.save();
   }
 
   async saveReasoningEffort(value: string): Promise<void> {
@@ -198,12 +261,6 @@ export class AIAgentSettingsComponent implements OnInit {
     this.reasoningEffort = value;
     this.config.store.aiAgent.reasoningEffort = value;
     await this.config.save();
-  }
-
-  /** Preset row matching the current selection, if any. */
-  get selectedPreset(): { label: string; hint: string; requiresToken: boolean } | null {
-    const preset = findModelPreset(this.modelPreset);
-    return preset ?? null;
   }
 
   /** What the reasoning selector will actually send for the current model. */
@@ -218,7 +275,6 @@ export class AIAgentSettingsComponent implements OnInit {
     return resolveReasoningStyle(
       this.config.store.aiAgent.llmEndpoint ?? "",
       this.config.store.aiAgent.model ?? "",
-      this.modelPreset,
     );
   }
 
@@ -285,6 +341,55 @@ export class AIAgentSettingsComponent implements OnInit {
     await this.config.save();
   }
 
+  async savePanelTheme(value: string): Promise<void> {
+    if (!isPanelThemeId(value)) {
+      return;
+    }
+    this.panelTheme = value;
+    this.config.store.aiAgent.panelTheme = value;
+    await this.config.save();
+  }
+
+  async saveWebSearchEnabled(value: boolean): Promise<void> {
+    this.webSearchEnabled = value;
+    this.config.store.aiAgent.webSearchEnabled = value;
+    await this.config.save();
+  }
+
+  async saveDeepSearchEnabled(value: boolean): Promise<void> {
+    this.deepSearchEnabled = value;
+    this.config.store.aiAgent.deepSearchEnabled = value;
+    await this.config.save();
+  }
+
+  async saveWebSearchMaxResults(value: number): Promise<void> {
+    const clamped = Math.min(15, Math.max(1, Math.round(Number(value) || 6)));
+    this.webSearchMaxResults = clamped;
+    this.config.store.aiAgent.webSearchMaxResults = clamped;
+    await this.config.save();
+  }
+
+  async saveDeepSearchMaxPages(value: number): Promise<void> {
+    const clamped = Math.min(10, Math.max(1, Math.round(Number(value) || 6)));
+    this.deepSearchMaxPages = clamped;
+    this.config.store.aiAgent.deepSearchMaxPages = clamped;
+    await this.config.save();
+  }
+
+  async saveWebSearchTimeoutMs(value: number): Promise<void> {
+    const clamped = Math.min(60000, Math.max(1000, Math.round(Number(value) || 8000)));
+    this.webSearchTimeoutMs = clamped;
+    this.config.store.aiAgent.webSearchTimeoutMs = clamped;
+    await this.config.save();
+  }
+
+  async saveWebFetchCharLimit(value: number): Promise<void> {
+    const clamped = Math.min(20000, Math.max(500, Math.round(Number(value) || 4000)));
+    this.webFetchCharLimit = clamped;
+    this.config.store.aiAgent.webFetchCharLimit = clamped;
+    await this.config.save();
+  }
+
   async saveMemoryEnabled(value: boolean): Promise<void> {
     this.memoryEnabled = value;
     this.config.store.aiAgent.memoryEnabled = value;
@@ -295,31 +400,6 @@ export class AIAgentSettingsComponent implements OnInit {
     const clamped = Math.min(20, Math.max(1, Math.round(value)));
     this.memoryRetrievalLimit = clamped;
     this.config.store.aiAgent.memoryRetrievalLimit = clamped;
-    await this.config.save();
-  }
-
-  async saveMemoryEmbeddingProvider(value: string): Promise<void> {
-    this.memoryEmbeddingProvider = value;
-    this.config.store.aiAgent.memoryEmbeddingProvider = value;
-    await this.config.save();
-  }
-
-  async saveMemoryEmbeddingEndpoint(value: string): Promise<void> {
-    this.memoryEmbeddingEndpoint = value;
-    this.config.store.aiAgent.memoryEmbeddingEndpoint = value;
-    await this.config.save();
-  }
-
-  async saveMemoryEmbeddingModel(value: string): Promise<void> {
-    this.memoryEmbeddingModel = value;
-    this.config.store.aiAgent.memoryEmbeddingModel = value;
-    await this.config.save();
-  }
-
-  async saveMemoryEmbeddingDimensions(value: number): Promise<void> {
-    const clamped = Math.max(0, Math.round(Number(value) || 0));
-    this.memoryEmbeddingDimensions = clamped;
-    this.config.store.aiAgent.memoryEmbeddingDimensions = clamped;
     await this.config.save();
   }
 
@@ -512,10 +592,21 @@ export class AIAgentSettingsComponent implements OnInit {
 
   private ensureConfigDefaults(): void {
     this.config.store.aiAgent ??= {};
+    if (!Array.isArray(this.config.store.aiAgent.providers)) {
+      this.config.store.aiAgent.providers = cloneProviders();
+    }
+    if (
+      !findProvider(
+        this.config.store.aiAgent.providers,
+        this.config.store.aiAgent.activeProviderId,
+      )
+    ) {
+      this.config.store.aiAgent.activeProviderId =
+        this.config.store.aiAgent.providers[0]?.id ?? DEFAULT_PROVIDER_ID;
+    }
     this.config.store.aiAgent.llmEndpoint ??= "";
     this.config.store.aiAgent.apiToken ??= "";
     this.config.store.aiAgent.model ??= "default";
-    this.config.store.aiAgent.modelPreset ??= CUSTOM_PRESET_ID;
     if (!isReasoningEffort(this.config.store.aiAgent.reasoningEffort)) {
       this.config.store.aiAgent.reasoningEffort = "off";
     }
@@ -529,7 +620,16 @@ export class AIAgentSettingsComponent implements OnInit {
     this.config.store.aiAgent.additionalSystemPrompt ??= "";
     this.config.store.aiAgent.panelPosition ??= "right";
     this.config.store.aiAgent.panelSizePercent ??= 40;
+    if (!isPanelThemeId(this.config.store.aiAgent.panelTheme)) {
+      this.config.store.aiAgent.panelTheme = DEFAULT_PANEL_THEME_ID;
+    }
     this.config.store.aiAgent.hideTerminalOutput ??= false;
+    this.config.store.aiAgent.webSearchEnabled ??= false;
+    this.config.store.aiAgent.deepSearchEnabled ??= false;
+    this.config.store.aiAgent.webSearchMaxResults ??= 6;
+    this.config.store.aiAgent.deepSearchMaxPages ??= 6;
+    this.config.store.aiAgent.webSearchTimeoutMs ??= 8000;
+    this.config.store.aiAgent.webFetchCharLimit ??= 4000;
     this.config.store.aiAgent.memoryEnabled ??= true;
     this.config.store.aiAgent.memoryRetrievalLimit ??= 6;
     this.config.store.aiAgent.memoryContextTokens ??= 1200;

@@ -9,7 +9,7 @@
   "scripts": {
     "build": "webpack --progress --color",
     "watch": "webpack --progress --color --watch",
-    "test": "tsc -p tsconfig.test.json && node .test-out/tests/llm_endpoint.test.js && node .test-out/tests/model_presets.test.js && node .test-out/tests/request_defaults.test.js && node .test-out/tests/memory.test.js"
+    "test": "tsc -p tsconfig.test.json && node .test-out/tests/llm_endpoint.test.js && node .test-out/tests/model_presets.test.js && node .test-out/tests/request_defaults.test.js && node .test-out/tests/web_client.test.js && node .test-out/tests/panel_themes.test.js && node .test-out/tests/zip.test.js && node .test-out/tests/memory.test.js"
   },
   "type": "commonjs",
   "publishConfig": {
@@ -64,6 +64,7 @@
     "webpack-cli": "^5.1.4"
   },
   "dependencies": {
+    "highlight.js": "^11.12.0",
     "marked": "^12.0.0"
   },
   "peerDependencies": {
