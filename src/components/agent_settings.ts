@@ -52,6 +52,10 @@ import {
   createProviderId,
   findProvider,
 } from "../lib/providers";
+import {
+  WEB_SEARCH_ENGINES,
+  normalizeSearchProvider,
+} from "../lib/web_client";
 
 @Component({
   templateUrl: "./agent_settings.html",
@@ -109,8 +113,10 @@ export class AIAgentSettingsComponent implements OnInit {
   deepSearchEnabled = false;
   webSearchMaxResults = 6;
   deepSearchMaxPages = 6;
-  webSearchTimeoutMs = 8000;
+  webSearchTimeoutMs = 15000;
   webFetchCharLimit = 4000;
+  webSearchProvider = "auto";
+  readonly searchEngines = WEB_SEARCH_ENGINES;
   memoryEnabled = true;
   memoryRetrievalLimit = 6;
   endpointCheckpointStatus:
@@ -151,8 +157,11 @@ export class AIAgentSettingsComponent implements OnInit {
     this.deepSearchEnabled = this.config.store.aiAgent.deepSearchEnabled === true;
     this.webSearchMaxResults = this.config.store.aiAgent.webSearchMaxResults ?? 6;
     this.deepSearchMaxPages = this.config.store.aiAgent.deepSearchMaxPages ?? 6;
-    this.webSearchTimeoutMs = this.config.store.aiAgent.webSearchTimeoutMs ?? 8000;
+    this.webSearchTimeoutMs = this.config.store.aiAgent.webSearchTimeoutMs ?? 15000;
     this.webFetchCharLimit = this.config.store.aiAgent.webFetchCharLimit ?? 4000;
+    this.webSearchProvider = normalizeSearchProvider(
+      this.config.store.aiAgent.webSearchProvider,
+    );
     this.memoryEnabled = this.config.store.aiAgent.memoryEnabled !== false;
     this.memoryRetrievalLimit = this.config.store.aiAgent.memoryRetrievalLimit ?? 6;
     this.autoApproveMaxRisk = isAutoApproveMaxRisk(
@@ -377,7 +386,7 @@ export class AIAgentSettingsComponent implements OnInit {
   }
 
   async saveWebSearchTimeoutMs(value: number): Promise<void> {
-    const clamped = Math.min(60000, Math.max(1000, Math.round(Number(value) || 8000)));
+    const clamped = Math.min(60000, Math.max(1000, Math.round(Number(value) || 15000)));
     this.webSearchTimeoutMs = clamped;
     this.config.store.aiAgent.webSearchTimeoutMs = clamped;
     await this.config.save();
@@ -387,6 +396,13 @@ export class AIAgentSettingsComponent implements OnInit {
     const clamped = Math.min(20000, Math.max(500, Math.round(Number(value) || 4000)));
     this.webFetchCharLimit = clamped;
     this.config.store.aiAgent.webFetchCharLimit = clamped;
+    await this.config.save();
+  }
+
+  async saveWebSearchProvider(value: string): Promise<void> {
+    const provider = normalizeSearchProvider(value);
+    this.webSearchProvider = provider;
+    this.config.store.aiAgent.webSearchProvider = provider;
     await this.config.save();
   }
 
@@ -628,8 +644,9 @@ export class AIAgentSettingsComponent implements OnInit {
     this.config.store.aiAgent.deepSearchEnabled ??= false;
     this.config.store.aiAgent.webSearchMaxResults ??= 6;
     this.config.store.aiAgent.deepSearchMaxPages ??= 6;
-    this.config.store.aiAgent.webSearchTimeoutMs ??= 8000;
+    this.config.store.aiAgent.webSearchTimeoutMs ??= 15000;
     this.config.store.aiAgent.webFetchCharLimit ??= 4000;
+    this.config.store.aiAgent.webSearchProvider ??= "auto";
     this.config.store.aiAgent.memoryEnabled ??= true;
     this.config.store.aiAgent.memoryRetrievalLimit ??= 6;
     this.config.store.aiAgent.memoryContextTokens ??= 1200;

@@ -15,7 +15,7 @@ const USER_AGENT =
 
 export const DEFAULT_WEB_SEARCH_RESULTS = 6;
 export const DEFAULT_DEEP_SEARCH_PAGES = 6;
-export const DEFAULT_WEB_TIMEOUT_MS = 8000;
+export const DEFAULT_WEB_TIMEOUT_MS = 15000;
 export const DEFAULT_WEB_CHAR_LIMIT = 4000;
 
 const MAX_RESPONSE_BYTES = 2_000_000;
@@ -32,6 +32,8 @@ export interface WebToolsConfig {
   maxPages(): number;
   timeoutMs(): number;
   charLimit(): number;
+  /** Выбранный движок поиска (id из WEB_SEARCH_ENGINES). */
+  provider(): string;
 }
 
 export interface HttpRequestOptions {
@@ -424,60 +426,301 @@ export function parseDuckDuckGo(html: string, maxResults: number): WebSearchResu
   return results;
 }
 
+/**
+ * Разбирает выдачу Brave Search (статический HTML). Резервный движок на случай,
+ * когда DuckDuckGo отдаёт bot-проверку/403.
+ */
+export function parseBraveResults(html: string, maxResults: number): WebSearchResult[] {
+  const source = String(html ?? "");
+  if (!source) {
+    return [];
+  }
+
+  const titles: Array<{ index: number; end: number; title: string }> = [];
+  const titleRe =
+    /class="title search-snippet-title[^"]*"\s+title="([^"]*)"[^>]*>([\s\S]*?)<\/div>/gi;
+  let match: RegExpExecArray | null;
+  while ((match = titleRe.exec(source)) !== null) {
+    const title = decodeHtmlEntities((match[1] || match[2] || "").trim());
+    if (title) {
+      titles.push({ index: match.index, end: match.index + match[0].length, title });
+    }
+  }
+
+  const results: WebSearchResult[] = [];
+  const seen = new Set<string>();
+  for (let i = 0; i < titles.length && results.length < maxResults; i++) {
+    const current = titles[i];
+    const before = source.slice(Math.max(0, current.index - 1500), current.index);
+    const hrefRe = /<a\b[^>]*href="(https?:\/\/[^"]+)"/gi;
+    let href: RegExpExecArray | null;
+    let url = "";
+    while ((href = hrefRe.exec(before)) !== null) {
+      url = href[1];
+    }
+    if (!url || seen.has(url)) {
+      continue;
+    }
+    let after = source.slice(
+      current.end,
+      titles[i + 1] ? titles[i + 1].index : current.end + 2500,
+    );
+    // Drop the start of the next result block (its opening tag is not closed
+    // inside this slice, so stripHtml would leave it as text).
+    const nextBlock = after.indexOf('<div class="snippet');
+    if (nextBlock >= 0) {
+      after = after.slice(0, nextBlock);
+    }
+    const snippetMatch =
+      /class="generic-snippet[^"]*"[^>]*>([\s\S]*?)(?=data-type="web"|<\/section>|$)/i.exec(
+        after,
+      );
+    const snippet = stripHtml(snippetMatch ? snippetMatch[1] : after).slice(0, 280);
+    seen.add(url);
+    results.push({ title: current.title, url, snippet });
+  }
+  return results;
+}
+
+function mwmblText(value: unknown): string {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (!Array.isArray(value)) {
+    return "";
+  }
+  return value
+    .map((part) => {
+      if (typeof part === "string") {
+        return part;
+      }
+      if (part && typeof part === "object" && "value" in part) {
+        return String((part as { value?: unknown }).value ?? "");
+      }
+      return "";
+    })
+    .join("");
+}
+
+/**
+ * Разбирает JSON индекса Mwmbl (`/api/v1/search`). Заголовок и сниппет там —
+ * массивы фрагментов `{ value }`, а не строки.
+ */
+export function parseMwmbl(payload: string, maxResults: number): WebSearchResult[] {
+  let data: unknown;
+  try {
+    data = JSON.parse(payload);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(data)) {
+    return [];
+  }
+  const results: WebSearchResult[] = [];
+  const seen = new Set<string>();
+  for (const item of data) {
+    if (results.length >= maxResults || !item || typeof item !== "object") {
+      break;
+    }
+    const record = item as { url?: unknown; title?: unknown; extract?: unknown };
+    const url = String(record.url ?? "").trim();
+    const title = mwmblText(record.title).replace(/\s+/g, " ").trim();
+    const snippet = mwmblText(record.extract).replace(/\s+/g, " ").trim().slice(0, 280);
+    if (!title || !isSafePublicUrl(url) || seen.has(url)) {
+      continue;
+    }
+    seen.add(url);
+    results.push({ title, url, snippet });
+  }
+  return results;
+}
+
+/** Ссылка Bing `/ck/a?u=a1<base64>` → настоящий адрес результата. */
+export function decodeBingUrl(href: string): string {
+  const raw = decodeHtmlEntities(String(href ?? "").trim());
+  if (!raw) {
+    return "";
+  }
+  try {
+    const url = new URL(raw);
+    if (url.hostname.endsWith("bing.com") && url.pathname.startsWith("/ck/")) {
+      const token = url.searchParams.get("u") ?? "";
+      const decoded = Buffer.from(token.replace(/^a1/, ""), "base64").toString("utf8");
+      if (isSafePublicUrl(decoded)) {
+        return decoded;
+      }
+    }
+    return isSafePublicUrl(url.toString()) ? url.toString() : "";
+  } catch {
+    return "";
+  }
+}
+
+/** Разбирает органическую выдачу Bing (`li.b_algo`), если страница её содержит. */
+export function parseBingResults(html: string, maxResults: number): WebSearchResult[] {
+  const source = String(html ?? "");
+  if (!source || /there are no results for/i.test(source)) {
+    return [];
+  }
+  const results: WebSearchResult[] = [];
+  const seen = new Set<string>();
+  const blocks = source.split(/<li[^>]*class="[^"]*\bb_algo\b[^"]*"/i).slice(1);
+  for (const block of blocks) {
+    if (results.length >= maxResults) {
+      break;
+    }
+    const link = /<h2[^>]*>\s*<a\b[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i.exec(block);
+    if (!link) {
+      continue;
+    }
+    const url = decodeBingUrl(link[1]);
+    const title = stripHtml(link[2]);
+    if (!url || !title || seen.has(url)) {
+      continue;
+    }
+    const snippetMatch = /<p[^>]*class="[^"]*b_lineclamp[^"]*"[^>]*>([\s\S]*?)<\/p>/i.exec(block);
+    const snippet = stripHtml(snippetMatch?.[1] ?? "").slice(0, 280);
+    seen.add(url);
+    results.push({ title, url, snippet });
+  }
+  return results;
+}
+
+export type WebSearchProviderId = "auto" | "duckduckgo" | "mwmbl" | "brave";
+
+export interface WebSearchEngineInfo {
+  id: WebSearchProviderId;
+  label: string;
+  description: string;
+}
+
+/** Выбираемые поисковые движки (показываются в меню «Поиск»). */
+export const WEB_SEARCH_ENGINES: WebSearchEngineInfo[] = [
+  { id: "auto", label: "Авто", description: "Несколько движков, пока один не ответит" },
+  { id: "mwmbl", label: "Mwmbl", description: "Открытый индекс, без проверки браузера" },
+  { id: "duckduckgo", label: "DuckDuckGo", description: "Без ключа; часто включает проверку" },
+  { id: "brave", label: "Brave", description: "Запасной статический поиск" },
+];
+
+export function normalizeSearchProvider(id: unknown): WebSearchProviderId {
+  return id === "duckduckgo" || id === "brave" || id === "mwmbl" ? id : "auto";
+}
+
+export function findWebSearchEngine(id: unknown): WebSearchEngineInfo {
+  const normalized = normalizeSearchProvider(id);
+  return (
+    WEB_SEARCH_ENGINES.find((engine) => engine.id === normalized) ??
+    WEB_SEARCH_ENGINES[0]
+  );
+}
+
 export interface DuckDuckGoSearchOptions {
   maxResults?: number;
   timeoutMs?: number;
   signal?: AbortSignal;
 }
 
-/**
- * Поиск в DuckDuckGo. Основной эндпоинт — POST `html.duckduckgo.com/html/`
- * (GET отдаёт страницу проверки «anomaly»), резервный — `lite.duckduckgo.com`.
- */
-export async function duckduckgoSearch(
-  query: string,
-  options: DuckDuckGoSearchOptions = {},
-): Promise<WebSearchResult[]> {
-  const cleanQuery = String(query ?? "").trim();
-  if (!cleanQuery) {
-    return [];
-  }
+export interface WebSearchOptions extends DuckDuckGoSearchOptions {
+  provider?: WebSearchProviderId | string;
+}
 
-  const maxResults = Math.max(1, Math.min(20, Math.floor(options.maxResults ?? DEFAULT_WEB_SEARCH_RESULTS)));
-  const timeoutMs = options.timeoutMs ?? DEFAULT_WEB_TIMEOUT_MS;
-  const endpoints = [
-    "https://html.duckduckgo.com/html/",
-    "https://lite.duckduckgo.com/lite/",
-  ];
+/** Пауза между поисковыми запросами, чтобы не устраивать залп в один движок. */
+const SEARCH_GAP_MS = 400;
+/** Сколько ждать DuckDuckGo. Дольше нет смысла: с этой сети он часто просто молчит. */
+const DDG_ATTEMPT_MS = 4500;
+/** После таймаута или проверки «anomaly» не трогаем DuckDuckGo пару минут. */
+const DDG_COOLDOWN_MS = 2 * 60 * 1000;
+/** Кэш одинаковых запросов: модель любит повторять один и тот же поиск. */
+const SEARCH_CACHE_TTL_MS = 10 * 60 * 1000;
+let ddgDownUntil = 0;
+let searchChain: Promise<unknown> = Promise.resolve();
+const searchCache = new Map<string, { at: number; results: WebSearchResult[] }>();
 
-  let lastError: Error | null = null;
-  for (const endpoint of endpoints) {
-    if (options.signal?.aborted) {
-      throw new DOMException("Operation was aborted.", "AbortError");
+/** Один поисковый запрос за раз. Глубокий поиск иначе бьёт в движок пачкой и ловит проверку. */
+function enqueueSearch<T>(job: () => Promise<T>): Promise<T> {
+  const run = searchChain.then(job, job);
+  searchChain = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException("Operation was aborted.", "AbortError"));
+      return;
     }
-    try {
-      const body = new URLSearchParams({ q: cleanQuery, b: "" }).toString();
-      const response = await httpRequest(endpoint, {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new DOMException("Operation was aborted.", "AbortError"));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function markDuckDuckGoDown(): void {
+  ddgDownUntil = Date.now() + DDG_COOLDOWN_MS;
+}
+
+/**
+ * Один проход DuckDuckGo: POST на html-выдачу и, если она пустая, GET lite.
+ * Повторные круги с паузой только быстрее приводили к проверке «anomaly».
+ */
+async function runDuckDuckGo(
+  cleanQuery: string,
+  maxResults: number,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<WebSearchResult[]> {
+  if (Date.now() < ddgDownUntil) {
+    throw new Error("DuckDuckGo временно пропущен: недавно ответил проверкой или молчанием.");
+  }
+  const attemptMs = Math.min(timeoutMs, DDG_ATTEMPT_MS);
+  const attempts: Array<() => Promise<HttpResponse>> = [
+    () =>
+      httpRequest("https://html.duckduckgo.com/html/", {
         method: "POST",
-        body,
-        timeoutMs,
-        signal: options.signal,
+        body: new URLSearchParams({ q: cleanQuery, b: "" }).toString(),
+        timeoutMs: attemptMs,
+        signal,
         headers: {
           "Content-Type": "application/x-www-form-urlencoded",
           Accept: "text/html,application/xhtml+xml",
         },
-      });
+      }),
+    () =>
+      httpRequest(
+        `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(cleanQuery)}`,
+        {
+          timeoutMs: attemptMs,
+          signal,
+          headers: { Accept: "text/html,application/xhtml+xml" },
+        },
+      ),
+  ];
+
+  let lastError: Error | null = null;
+  for (const attempt of attempts) {
+    if (signal?.aborted) {
+      throw new DOMException("Operation was aborted.", "AbortError");
+    }
+    try {
+      const response = await attempt();
       if (response.status >= 400) {
         lastError = new Error(`DuckDuckGo ответил HTTP ${response.status}.`);
         continue;
       }
-      const html = response.body;
-      const hasResults = /result__a|result-link/i.test(html);
-      if (!hasResults && /anomaly/i.test(html)) {
-        lastError = new Error("DuckDuckGo запросил проверку (anomaly); попробуйте позже.");
+      if (/anomaly/i.test(response.body) && !/result__a|result-link/i.test(response.body)) {
+        lastError = new Error("DuckDuckGo запросил проверку (anomaly).");
         continue;
       }
-      const results = parseDuckDuckGo(html, maxResults);
+      const results = parseDuckDuckGo(response.body, Math.max(maxResults, 20));
       if (results.length) {
         return results;
       }
@@ -487,10 +730,191 @@ export async function duckduckgoSearch(
         throw error;
       }
       lastError = error instanceof Error ? error : new Error(String(error));
+      // Молчание — это обрыв маршрута, а не пустая выдача: второй хост ждать незачем.
+      if (/ожидания|timeout/i.test(lastError.message)) {
+        break;
+      }
     }
   }
+  markDuckDuckGoDown();
+  throw lastError ?? new Error("DuckDuckGo не дал результатов.");
+}
 
-  throw lastError ?? new Error("Поиск в DuckDuckGo не удался.");
+/** Открытый индекс Mwmbl: обычный JSON, без браузерной проверки. */
+async function runMwmbl(
+  cleanQuery: string,
+  maxResults: number,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<WebSearchResult[]> {
+  const response = await httpRequest(
+    `https://mwmbl.org/api/v1/search/?s=${encodeURIComponent(cleanQuery)}`,
+    {
+      timeoutMs: Math.min(timeoutMs, 8000),
+      signal,
+      headers: { Accept: "application/json" },
+    },
+  );
+  if (response.status >= 400) {
+    throw new Error(`Mwmbl ответил HTTP ${response.status}.`);
+  }
+  const results = parseMwmbl(response.body, Math.max(maxResults, 20));
+  if (!results.length) {
+    throw new Error("Mwmbl не вернул результатов.");
+  }
+  return results;
+}
+
+/** Bing HTML. Часто отдаёт пустую страницу-заглушку — тогда сразу идём дальше. */
+async function runBing(
+  cleanQuery: string,
+  maxResults: number,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<WebSearchResult[]> {
+  const response = await httpRequest(
+    `https://www.bing.com/search?q=${encodeURIComponent(cleanQuery)}&count=10`,
+    {
+      timeoutMs: Math.min(timeoutMs, 8000),
+      signal,
+      headers: { Accept: "text/html,application/xhtml+xml" },
+    },
+  );
+  if (response.status >= 400) {
+    throw new Error(`Bing ответил HTTP ${response.status}.`);
+  }
+  const results = parseBingResults(response.body, Math.max(maxResults, 20));
+  if (!results.length) {
+    throw new Error("Bing не вернул результатов.");
+  }
+  return results;
+}
+
+/** Brave Search: обычный статический HTML, парсится `parseBraveResults`. */
+async function runBrave(
+  cleanQuery: string,
+  maxResults: number,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<WebSearchResult[]> {
+  const url = `https://search.brave.com/search?q=${encodeURIComponent(cleanQuery)}`;
+  const response = await httpRequest(url, {
+    timeoutMs,
+    signal,
+    headers: { Accept: "text/html,application/xhtml+xml" },
+  });
+  if (response.status === 429) {
+    throw new Error("Brave запросил проверку.");
+  }
+  if (response.status >= 400) {
+    throw new Error(`Brave ответил HTTP ${response.status}.`);
+  }
+  const results = parseBraveResults(response.body, Math.max(maxResults, 20));
+  if (!results.length) {
+    throw new Error("Brave не вернул результатов.");
+  }
+  return results;
+}
+
+type SearchEngineId = "duckduckgo" | "mwmbl" | "bing" | "brave";
+
+const ENGINE_LABEL: Record<SearchEngineId, string> = {
+  duckduckgo: "DuckDuckGo",
+  mwmbl: "Mwmbl",
+  bing: "Bing",
+  brave: "Brave",
+};
+
+/** Явный движок идёт первым, остальные остаются запасом. */
+function engineOrder(provider: WebSearchProviderId): SearchEngineId[] {
+  const rest: SearchEngineId[] = ["duckduckgo", "mwmbl", "bing", "brave"];
+  if (provider === "auto") {
+    return rest;
+  }
+  return [provider, ...rest.filter((engine) => engine !== provider)];
+}
+
+/**
+ * Веб-поиск с выбором движка. Запросы идут по одному и кэшируются на 10 минут.
+ * Первый движок, который вернул результаты, выигрывает — остальные не дёргаем.
+ */
+export async function searchWeb(
+  query: string,
+  options: WebSearchOptions = {},
+): Promise<WebSearchResult[]> {
+  const cleanQuery = String(query ?? "").trim();
+  if (!cleanQuery) {
+    return [];
+  }
+
+  const maxResults = Math.max(1, Math.min(20, Math.floor(options.maxResults ?? DEFAULT_WEB_SEARCH_RESULTS)));
+  const timeoutMs = options.timeoutMs ?? DEFAULT_WEB_TIMEOUT_MS;
+  const provider = normalizeSearchProvider(options.provider);
+
+  const cacheKey = `${provider}:${cleanQuery.toLowerCase()}`;
+  const cached = searchCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < SEARCH_CACHE_TTL_MS) {
+    return cached.results.slice(0, maxResults);
+  }
+
+  return enqueueSearch(async () => {
+    const again = searchCache.get(cacheKey);
+    if (again && Date.now() - again.at < SEARCH_CACHE_TTL_MS) {
+      return again.results.slice(0, maxResults);
+    }
+    await sleep(SEARCH_GAP_MS, options.signal);
+
+    const failures: string[] = [];
+    for (const engine of engineOrder(provider)) {
+      if (options.signal?.aborted) {
+        throw new DOMException("Operation was aborted.", "AbortError");
+      }
+      try {
+        const results = await runEngine(engine, cleanQuery, maxResults, timeoutMs, options.signal);
+        if (results.length) {
+          searchCache.set(cacheKey, { at: Date.now(), results });
+          return results.slice(0, maxResults);
+        }
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") {
+          throw error;
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        failures.push(`${ENGINE_LABEL[engine]}: ${message}`);
+      }
+    }
+
+    throw new Error(
+      `Поиск не удался. ${failures.join("; ")}. Повторите позже или выберите другой движок в меню «Поиск».`,
+    );
+  });
+}
+
+function runEngine(
+  engine: SearchEngineId,
+  query: string,
+  maxResults: number,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<WebSearchResult[]> {
+  switch (engine) {
+    case "duckduckgo":
+      return runDuckDuckGo(query, maxResults, timeoutMs, signal);
+    case "mwmbl":
+      return runMwmbl(query, maxResults, timeoutMs, signal);
+    case "bing":
+      return runBing(query, maxResults, timeoutMs, signal);
+    case "brave":
+      return runBrave(query, maxResults, timeoutMs, signal);
+  }
+}
+
+/** Обратная совместимость: поиск в режиме «Авто». */
+export async function duckduckgoSearch(
+  query: string,
+  options: DuckDuckGoSearchOptions = {},
+): Promise<WebSearchResult[]> {
+  return searchWeb(query, { ...options, provider: "auto" });
 }
 
 export interface FetchPageOptions {

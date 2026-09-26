@@ -63,6 +63,8 @@ export interface AIAgentConfig {
   webSearchTimeoutMs: number;
   /** Max characters extracted from one page. */
   webFetchCharLimit: number;
+  /** Search engine for web tools: `auto`, `duckduckgo` or `brave`. */
+  webSearchProvider: string;
   /** Visual theme of the panel (see lib/panel_themes). Default: neon-log. */
   panelTheme: string;
 }
@@ -104,8 +106,9 @@ export class AIAgentConfigProvider extends ConfigProvider {
       deepSearchEnabled: false,
       webSearchMaxResults: 6,
       deepSearchMaxPages: 6,
-      webSearchTimeoutMs: 8000,
+      webSearchTimeoutMs: 15000,
       webFetchCharLimit: 4000,
+      webSearchProvider: "auto",
       panelTheme: DEFAULT_PANEL_THEME_ID,
     },
     hotkeys: {

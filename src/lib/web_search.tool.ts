@@ -2,8 +2,8 @@ import { Tool, ToolArgDefinition, ToolExecutionContext, toolProgress } from "./t
 import {
   DEFAULT_WEB_SEARCH_RESULTS,
   WebToolsConfig,
-  duckduckgoSearch,
   formatSearchResults,
+  searchWeb,
 } from "./web_client";
 
 interface WebSearchArgs {
@@ -26,7 +26,7 @@ export class WebSearchTool implements Tool {
 
   description(): string {
     return [
-      "Найти информацию в интернете через DuckDuckGo и вернуть заголовки, ссылки и краткие описания.",
+      "Найти информацию в интернете и вернуть заголовки, ссылки и краткие описания. Движки перебираются сами, если один недоступен.",
       "Используй для быстрых фактов, версий, новостей, документации и любых внешних сведений, которых нет в терминале или памяти.",
       "Для вопросов, требующих сбора и анализа нескольких источников, используй deep_search; для чтения конкретной страницы — web_fetch.",
     ].join(" ");
@@ -64,9 +64,10 @@ export class WebSearchTool implements Tool {
       output: toolProgress(`Веб-поиск: «${query}»…`),
     });
 
-    const results = await duckduckgoSearch(query, {
+    const results = await searchWeb(query, {
       maxResults: limit,
       timeoutMs: this.config.timeoutMs(),
+      provider: this.config.provider(),
       signal: context?.signal,
     });
 

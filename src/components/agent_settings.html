@@ -247,6 +247,22 @@
     </div>
 
     <div class="input-wrap">
+      <label class="input-label" for="ai-agent-web-search-engine">
+        Поисковый движок
+      </label>
+      <select
+        id="ai-agent-web-search-engine"
+        class="form-control"
+        [ngModel]="webSearchProvider"
+        (ngModelChange)="saveWebSearchProvider($event)"
+      >
+        <option *ngFor="let engine of searchEngines" [value]="engine.id">
+          {{ engine.label }} — {{ engine.description }}
+        </option>
+      </select>
+    </div>
+
+    <div class="input-wrap">
       <label class="input-label" for="ai-agent-web-search-results">
         Результатов на запрос: <strong>{{ webSearchMaxResults }}</strong>
       </label>

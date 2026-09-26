@@ -40,6 +40,35 @@
         <i class="fas fa-search-plus"></i>
         <span>Deep</span>
       </button>
+      <div class="search-picker">
+        <button
+          class="btn btn-link btn-sm theme-toggle"
+          type="button"
+          [class.active]="searchMenuOpen"
+          (click)="toggleSearchMenu($event)"
+          [title]="'Движок веб-поиска: ' + currentSearchEngine.label"
+        >
+          <i class="fas fa-magnifying-glass"></i>
+          <span>{{ currentSearchEngine.label }}</span>
+          <i class="fas fa-chevron-down theme-caret"></i>
+        </button>
+        <div class="theme-menu" *ngIf="searchMenuOpen">
+          <div class="theme-menu-head">Движок веб-поиска</div>
+          <button
+            class="theme-item"
+            type="button"
+            *ngFor="let engine of searchEngines; trackBy: trackEngine"
+            [class.current]="engine.id === webSearchProvider"
+            (click)="selectSearchProvider(engine.id)"
+          >
+            <span class="theme-item-copy">
+              <span class="theme-item-label">{{ engine.label }}</span>
+              <span class="theme-item-desc">{{ engine.description }}</span>
+            </span>
+            <i class="fas fa-check theme-item-check" *ngIf="engine.id === webSearchProvider"></i>
+          </button>
+        </div>
+      </div>
       <div class="theme-picker">
         <button
           class="btn btn-link btn-sm theme-toggle"
@@ -156,6 +185,7 @@
       [class.collapsed]="message.collapsed"
       [class.tool]="message.role === 'tool'"
       [class.system]="message.role === 'system'"
+      [class.tool-only]="message.toolOnly"
     >
       <div class="message-header">
         <button
@@ -182,6 +212,14 @@
         </span>
         <span class="stream-state text-muted" *ngIf="message.streaming">
           идёт генерация
+        </span>
+        <span
+          class="msg-duration"
+          *ngIf="message.role === 'assistant' && message.durationMs != null"
+          [title]="'Сгенерировано за ' + formatDuration(message.durationMs)"
+        >
+          <i class="fas fa-clock"></i>
+          {{ formatDuration(message.durationMs) }}
         </span>
         <div
           class="msg-copy-group"
@@ -260,6 +298,14 @@
             <div class="tool-call-header">
               <span class="tool-name">{{ toolCall.name }}</span>
               <span class="tool-status">{{ toolStatusLabel(toolCall.status) }}</span>
+              <span
+                class="tool-duration"
+                *ngIf="toolCall.durationMs != null"
+                [title]="'Выполнено за ' + formatDuration(toolCall.durationMs)"
+              >
+                <i class="fas fa-stopwatch"></i>
+                {{ formatDuration(toolCall.durationMs) }}
+              </span>
             </div>
             <pre class="tool-command" *ngIf="toolCall.command"
               >{{ toolCall.command }}</pre
@@ -393,6 +439,13 @@
     </button>
   </div>
 
+  <div class="run-status" *ngIf="showRunStatus">
+    <span class="run-spinner" aria-hidden="true"></span>
+    <span class="run-status-label">{{ runStatusLabel }}</span>
+    <span class="run-status-time">{{ commandElapsedDisplay }}</span>
+    <span class="run-status-hint">вывод появится по завершении</span>
+  </div>
+
   <div class="composer-error" *ngIf="lastError">{{ lastError }}</div>
 
   <div class="input-area">
@@ -471,7 +524,7 @@
     type="file"
     multiple
     class="hidden-file-input"
-    accept="image/*,.txt,.md,.markdown,.json,.js,.mjs,.cjs,.ts,.tsx,.jsx,.py,.go,.rs,.c,.h,.cpp,.hpp,.cc,.java,.kt,.sh,.bash,.zsh,.bat,.cmd,.ps1,.yaml,.yml,.toml,.ini,.cfg,.conf,.log,.csv,.tsv,.html,.htm,.css,.scss,.less,.sql,.xml,.vue,.svelte,.rb,.php,.pl,.swift,.r,.dart,.lua,.diff,.patch,.env,.properties,.gitignore"
+    accept="image/*,.pdf,.txt,.md,.markdown,.json,.js,.mjs,.cjs,.ts,.tsx,.jsx,.py,.go,.rs,.c,.h,.cpp,.hpp,.cc,.java,.kt,.sh,.bash,.zsh,.bat,.cmd,.ps1,.yaml,.yml,.toml,.ini,.cfg,.conf,.log,.csv,.tsv,.html,.htm,.css,.scss,.less,.sql,.xml,.vue,.svelte,.rb,.php,.pl,.swift,.r,.dart,.lua,.diff,.patch,.env,.properties,.gitignore"
     (change)="onFilesSelected($event)"
   />
 </div>

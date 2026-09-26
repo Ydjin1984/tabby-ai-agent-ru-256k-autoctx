@@ -9,8 +9,8 @@ import {
   FetchedPage,
   WebSearchResult,
   WebToolsConfig,
-  duckduckgoSearch,
   fetchPageText,
+  searchWeb,
 } from "./web_client";
 
 interface DeepSearchArgs {
@@ -108,15 +108,26 @@ export class DeepSearchTool implements Tool {
       ),
     });
 
-    const searches = await Promise.all(
-      subQueries.map((subQuery) =>
-        duckduckgoSearch(subQuery, {
-          maxResults: this.config.maxResults(),
-          timeoutMs,
-          signal: context?.signal,
-        }).catch(() => [] as WebSearchResult[]),
-      ),
-    );
+    const searches: WebSearchResult[][] = [];
+    const failures: string[] = [];
+    for (const subQuery of subQueries) {
+      try {
+        searches.push(
+          await searchWeb(subQuery, {
+            maxResults: this.config.maxResults(),
+            timeoutMs,
+            provider: this.config.provider(),
+            signal: context?.signal,
+          }),
+        );
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") {
+          throw error;
+        }
+        failures.push(error instanceof Error ? error.message : String(error));
+        searches.push([]);
+      }
+    }
 
     const order: string[] = [];
     const byUrl = new Map<string, { result: WebSearchResult; hits: number }>();
@@ -145,7 +156,10 @@ export class DeepSearchTool implements Tool {
       .map((item) => item.entry.result);
 
     if (!targets.length) {
-      return `Глубокий поиск по запросу «${query}» не нашёл источников. Уточни формулировку или используй web_search.`;
+      const reason = failures[0]
+        ? ` Причина: ${failures[0]}`
+        : " Уточни формулировку.";
+      return `Глубокий поиск по запросу «${query}» не нашёл источников.${reason}`;
     }
 
     const pages: Array<FetchedPage | null> = new Array(targets.length).fill(null);

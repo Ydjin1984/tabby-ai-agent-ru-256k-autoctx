@@ -44,13 +44,11 @@ export const KIBBORG_SAMPLING_DEFAULTS: Record<string, number> = {
   repeat_penalty: 1.05,
   frequency_penalty: 0.2,
   /**
-   * Ceiling for a single generated response. Not a step/turn limit: the agent may
-   * take as many tool rounds as it needs. This only bounds one stream so a
-   * pathological single generation cannot run away; the real ceiling is the
-   * context window. Set generously (thinking off answers are short, but the
-   * model is a reasoning model when thinking is enabled).
+   * Ceiling for one generation when thinking is off. Tool calls and a normal
+   * answer fit; a runaway stream still stops. With thinking enabled,
+   * `ensureThinkingBudget` raises this to budget + answer reserve.
    */
-  max_tokens: 16384,
+  max_tokens: 4096,
 };
 
 /** Keys that make the model "think"; they must not survive a gateway hop. */

@@ -19,6 +19,11 @@ import {
   LLMHistoryItem,
 } from "../lib/llm_chat_session";
 import { TOOL_PROGRESS_PREFIX, Tool, ToolExecutionState } from "../lib/tool_types";
+import {
+  clipAttachmentText,
+  extractPdfText,
+  looksLikeText,
+} from "../lib/file_text";
 import { RunShellCommandTool } from "../lib/run_shell_command.tool";
 import { CancelCommandTool } from "../lib/cancel_command.tool";
 import { TerminalContextService } from "../services/terminal_context.service";
@@ -32,7 +37,11 @@ import {
   DEFAULT_WEB_CHAR_LIMIT,
   DEFAULT_WEB_SEARCH_RESULTS,
   DEFAULT_WEB_TIMEOUT_MS,
+  WEB_SEARCH_ENGINES,
+  WebSearchEngineInfo,
   WebToolsConfig,
+  findWebSearchEngine,
+  normalizeSearchProvider,
 } from "../lib/web_client";
 import webToolsSystemPrompt from "../prompts/web_tools_system_prompt.md";
 import {
@@ -105,6 +114,10 @@ interface ToolCallViewModel {
   question: string | null;
   choices: string[];
   outputCollapsed?: boolean;
+  /** Когда инструмент начал выполняться (для подсчёта длительности). */
+  startedAt?: number | null;
+  /** Сколько инструмент выполнялся, мс. */
+  durationMs?: number | null;
 }
 
 interface PendingUserInputRequest {
@@ -123,6 +136,12 @@ interface ChatMessageViewModel {
   collapsed?: boolean;
   toolCallIds?: string[];
   toolCallId?: string | null;
+  /** Сообщение-«хост»: несёт только карточки инструментов, без своего текста. */
+  toolOnly?: boolean;
+  /** Начало генерации ответа (для подсчёта длительности). */
+  startedAt?: number;
+  /** Длительность генерации ответа, мс. */
+  durationMs?: number;
   /** data URLs прикреплённых изображений (для превью в ленте). */
   images?: string[];
 }
@@ -221,10 +240,24 @@ export class AIPanelComponent implements OnInit, AfterViewInit, OnDestroy {
   /** Доступные темы панели (расширяется в lib/panel_themes). */
   readonly panelThemes: PanelTheme[] = PANEL_THEMES;
   themeMenuOpen = false;
+  readonly searchEngines: WebSearchEngineInfo[] = WEB_SEARCH_ENGINES;
+  searchMenuOpen = false;
   /** id сообщения, для которого только что показали «Скопировано» (Markdown). */
   copiedMessageId: string | null = null;
   /** id сообщения, для которого только что скопировали обычный текст. */
   copiedTextMessageId: string | null = null;
+
+  /** Время старта текущей команды — для индикатора «выполняется · N с». */
+  private turnStartedAt = 0;
+  /** Миллисекунды с начала выполнения команды (обновляется таймером 10 раз/с). */
+  commandElapsedMs = 0;
+  private executionTimer: ReturnType<typeof setInterval> | null = null;
+  /** Сообщение-хост текущего хода, куда складываются карточки инструментов. */
+  private toolHostMessageId: string | null = null;
+  /** Каноническая карточка для повторных опросов get_terminal_lines. */
+  private pollCardId: string | null = null;
+  /** newToolCallId → канонический id (для схлопнутых повторов). */
+  private toolCallAlias = new Map<string, string>();
   /** CSS-переменные, выставленные предыдущей темой — чтобы вернуть их при смене. */
   private appliedThemeVars: string[] = [];
   /** Кэш Electron-clipboard (самый надёжный путь копирования в рендерере). */
@@ -261,6 +294,7 @@ export class AIPanelComponent implements OnInit, AfterViewInit, OnDestroy {
     this.config.store.aiAgent.deepSearchMaxPages ??= DEFAULT_DEEP_SEARCH_PAGES;
     this.config.store.aiAgent.webSearchTimeoutMs ??= DEFAULT_WEB_TIMEOUT_MS;
     this.config.store.aiAgent.webFetchCharLimit ??= DEFAULT_WEB_CHAR_LIMIT;
+    this.config.store.aiAgent.webSearchProvider ??= "auto";
     if (!isPanelThemeId(this.config.store.aiAgent.panelTheme)) {
       this.config.store.aiAgent.panelTheme = DEFAULT_PANEL_THEME_ID;
     }
@@ -272,6 +306,7 @@ export class AIPanelComponent implements OnInit, AfterViewInit, OnDestroy {
         DEFAULT_CONTEXT_WINDOW_TOKENS,
     );
     this.initializeSession();
+    this.warmSession();
     this.settingsSignature = this.currentSettingsSignature();
     this.refreshContextUsage();
     this.applyMemoryConfig();
@@ -296,6 +331,7 @@ export class AIPanelComponent implements OnInit, AfterViewInit, OnDestroy {
     this.configSubscription?.unsubscribe();
     this.configSubscription = null;
     this.stopAutoScrollLoop();
+    this.stopExecutionTimer();
     this.currentAbortController?.abort();
     this.cancelPendingApprovals();
     this.cancelPendingUserInputs();
@@ -347,7 +383,7 @@ export class AIPanelComponent implements OnInit, AfterViewInit, OnDestroy {
     // добираем его перед первым рабочим запросом, иначе «память проекта» и привязка
     // записей к каталогу остаются пустыми на всю жизнь панели.
     if (!this.memoryEnvironmentResolved) {
-      void this.updateMemoryEnvironment();
+      await this.updateMemoryEnvironment();
     }
 
     this.lastError = null;
@@ -356,18 +392,50 @@ export class AIPanelComponent implements OnInit, AfterViewInit, OnDestroy {
     this.draftPrompt = "";
     this.resetTextareaHeight();
     this.clearStreamingDrafts();
+    this.resetTurnGrouping();
 
-    const images = this.attachments
+    const attached = this.attachments.slice();
+    const images = attached
       .filter((a) => a.kind === "image" && a.dataUrl)
       .map((a) => a.dataUrl as string);
-    const textParts = this.attachments
-      .filter((a) => a.kind === "text")
-      .map((a) => `--- Файл: ${a.name} ---\n${a.text}`);
-    const userMessage = [prompt, ...textParts].filter(Boolean).join("\n\n");
-    const attachmentNames = this.attachments.map((a) => a.name).join(", ");
-    const displayContent = [prompt, attachmentNames ? `📎 ${attachmentNames}` : ""]
-      .filter(Boolean)
-      .join("\n");
+    const imageNames = attached
+      .filter((a) => a.kind === "image")
+      .map((a) => a.name);
+    const textParts: string[] = [];
+    const displayNotes: string[] = [];
+    for (const file of attached) {
+      if (file.kind === "image") {
+        displayNotes.push(`📎 ${file.name} — картинка передана в контекст`);
+        continue;
+      }
+      const clipped = clipAttachmentText(file.text ?? "");
+      textParts.push(`--- Файл: ${file.name} ---\n${clipped.text}`);
+      displayNotes.push(
+        `📎 ${file.name} — в контексте ${clipped.text.length} символов${
+          clipped.clipped ? " (файл длиннее, переданы начало и конец)" : ""
+        }`,
+      );
+    }
+    const preface = attached.length
+      ? "Пользователь прикрепил файлы к этому сообщению. Сначала опирайся на их содержимое. Не пиши, что вложений не было."
+      : "";
+    const imageNote = imageNames.length
+      ? `Картинки в этом сообщении: ${imageNames.join(", ")}. Они переданы как изображения. Если пиксели тебе недоступны, скажи об этом прямо и не выдумывай содержимое.`
+      : "";
+    const userMessage = [prompt, preface, imageNote, ...textParts]
+      .filter((part) => part && part.trim())
+      .join("\n\n");
+    agentLog("attachments", {
+      count: attached.length,
+      images: imageNames.length,
+      userChars: userMessage.length,
+      files: attached.map((file) => ({
+        name: file.name,
+        kind: file.kind,
+        chars: file.kind === "text" ? (file.text ?? "").length : file.dataUrl?.length ?? 0,
+      })),
+    });
+    const displayContent = [prompt, ...displayNotes].filter(Boolean).join("\n");
 
     this.appendMessage({
       id: this.generateId("user"),
@@ -404,8 +472,24 @@ export class AIPanelComponent implements OnInit, AfterViewInit, OnDestroy {
           const needsUserInput = toolName === "ask_user";
           const autoApproved =
             needsApproval && this.shouldAutoApproveCommand(args);
+
+          // Повторные опросы терминала схлопываем в одну карточку: за длинную
+          // команду модель иначе плодит десятки одинаковых блоков.
+          let cardId = toolCallId;
+          if (toolName === "get_terminal_lines") {
+            if (
+              this.pollCardId &&
+              this.toolCalls.some((item) => item.id === this.pollCardId)
+            ) {
+              cardId = this.pollCardId;
+              this.toolCallAlias.set(toolCallId, cardId);
+            } else {
+              this.pollCardId = toolCallId;
+            }
+          }
+
           this.upsertToolCall(
-            this.toToolCallViewModel(toolCallId, toolName, args, {
+            this.toToolCallViewModel(cardId, toolName, args, {
               status: needsUserInput
                 ? "awaiting_user_input"
                 : needsApproval
@@ -419,7 +503,9 @@ export class AIPanelComponent implements OnInit, AfterViewInit, OnDestroy {
                 ? autoApproved
                   ? this.getAutoApprovalMessage(args)
                   : null
-                : "Выполнение инструмента...",
+                : toolName === "get_terminal_lines"
+                  ? "Чтение вывода терминала…"
+                  : "Выполнение инструмента...",
               errorMessage: null,
             }),
           );
@@ -433,13 +519,14 @@ export class AIPanelComponent implements OnInit, AfterViewInit, OnDestroy {
           }
 
           return await new Promise<boolean>((resolve) => {
-            this.pendingToolApprovals.set(toolCallId, {
+            this.pendingToolApprovals.set(cardId, {
               resolve,
               settled: false,
             });
           });
         },
         onToolResult: async (toolCallId, toolName, args, output) => {
+          toolCallId = this.canonicalToolCallId(toolCallId);
           const existingToolCall = this.toolCalls.find(
             (item) => item.id === toolCallId,
           );
@@ -471,11 +558,16 @@ export class AIPanelComponent implements OnInit, AfterViewInit, OnDestroy {
           errorMessage,
         ) => {
           this.upsertToolCall(
-            this.toToolCallViewModel(toolCallId, toolName, args, {
-              status: "error",
-              output: null,
-              errorMessage,
-            }),
+            this.toToolCallViewModel(
+              this.canonicalToolCallId(toolCallId),
+              toolName,
+              args,
+              {
+                status: "error",
+                output: null,
+                errorMessage,
+              },
+            ),
           );
         },
         signal: this.currentAbortController.signal,
@@ -495,6 +587,7 @@ export class AIPanelComponent implements OnInit, AfterViewInit, OnDestroy {
     } finally {
       this.currentAbortController = null;
       this.sending = false;
+      this.stopExecutionTimer();
       this.focusPrompt();
       this.refreshContextUsage();
       void this.maybeAutoCompact();
@@ -514,6 +607,7 @@ export class AIPanelComponent implements OnInit, AfterViewInit, OnDestroy {
     this.finalizeStreamingDrafts();
     this.markActiveToolCallsStopped();
     this.cancelPendingUserInputs();
+    this.stopExecutionTimer();
   }
 
   /**
@@ -943,22 +1037,45 @@ export class AIPanelComponent implements OnInit, AfterViewInit, OnDestroy {
       return { id, name, kind: "image", dataUrl, size };
     }
 
-    if (this.isTextFileName(name)) {
-      if (file.size > 1024 * 1024) {
-        this.lastError = `Файл «${name}» слишком большой для текста (максимум 1 МБ).`;
+    const isPdf = file.type === "application/pdf" || /\.pdf$/i.test(name);
+    if (isPdf) {
+      if (file.size > 15 * 1024 * 1024) {
+        this.lastError = `Файл «${name}» слишком большой для PDF (максимум 15 МБ).`;
         return null;
       }
-      const text = await this.readFileAsText(file);
+      const bytes = await this.readFileAsBytes(file);
+      const extracted = extractPdfText(bytes);
+      const text = extracted
+        ? extracted
+        : `[PDF «${name}» прикреплён (${this.formatBytes(size)}), но текстовый слой не извлечён. Это может быть скан.]`;
       return { id, name, kind: "text", text, size };
+    }
+
+    if (file.size > 1024 * 1024) {
+      this.lastError = `Файл «${name}» слишком большой для текста (максимум 1 МБ).`;
+      return null;
+    }
+    const raw = await this.readFileAsText(file);
+    if (this.isTextFileName(name) || file.type.startsWith("text/") || looksLikeText(raw)) {
+      return { id, name, kind: "text", text: raw, size };
     }
 
     return {
       id,
       name,
       kind: "text",
-      text: `[Прикреплён файл: ${name} (${this.formatBytes(size)})]`,
+      text: `[Прикреплён файл: ${name} (${this.formatBytes(size)}). Содержимое не текстовое и в контекст не попало.]`,
       size,
     };
+  }
+
+  private readFileAsBytes(file: File): Promise<Uint8Array> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(new Uint8Array(reader.result as ArrayBuffer));
+      reader.onerror = () => reject(reader.error);
+      reader.readAsArrayBuffer(file);
+    });
   }
 
   private readFileAsDataUrl(file: File): Promise<string> {
@@ -1002,6 +1119,8 @@ export class AIPanelComponent implements OnInit, AfterViewInit, OnDestroy {
     this.clearStreamingDrafts();
     this.cancelPendingApprovals();
     this.cancelPendingUserInputs();
+    this.stopExecutionTimer();
+    this.resetTurnGrouping();
     this.initializeSession();
     this.refreshContextUsage();
   }
@@ -1106,6 +1225,10 @@ export class AIPanelComponent implements OnInit, AfterViewInit, OnDestroy {
     return theme.id;
   }
 
+  trackEngine(_index: number, engine: WebSearchEngineInfo): string {
+    return engine.id;
+  }
+
   toggleMessageCollapsed(messageId: string): void {
     this.messages = this.messages.map((message) =>
       message.id === messageId
@@ -1154,7 +1277,11 @@ export class AIPanelComponent implements OnInit, AfterViewInit, OnDestroy {
     }
 
     const tools: Tool[] = [
-      new GetTerminalLinesTool(this.frontend, this.terminalContext),
+      new GetTerminalLinesTool(
+        this.frontend,
+        this.terminalContext,
+        () => this.hasExecutingShellCommand,
+      ),
       new RunShellCommandTool(this.terminal, this.terminalContext),
       new CancelCommandTool(this.terminal),
     ];
@@ -1164,6 +1291,7 @@ export class AIPanelComponent implements OnInit, AfterViewInit, OnDestroy {
       maxPages: () => this.getDeepSearchMaxPages(),
       timeoutMs: () => this.getWebSearchTimeoutMs(),
       charLimit: () => this.getWebFetchCharLimit(),
+      provider: () => this.webSearchProvider,
     };
     if (this.deepSearchEnabled) {
       tools.push(new DeepSearchTool(webConfig));
@@ -1196,6 +1324,16 @@ export class AIPanelComponent implements OnInit, AfterViewInit, OnDestroy {
       history,
       this.memoryService.manager,
     );
+    this.chatSession.setContextWindowTokens(this.contextWindowTokens);
+  }
+
+  /** Прогрев кэша префикса на локальном Киборге. Ошибка прогрева чат не ломает. */
+  private warmSession(): void {
+    void this.chatSession?.warmup().catch((error) => {
+      agentLog("warmup_failed", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    });
   }
 
   /** Push the current memory toggles into the shared memory manager. */
@@ -1260,12 +1398,14 @@ export class AIPanelComponent implements OnInit, AfterViewInit, OnDestroy {
 
     const history = this.chatSession?.snapshotHistory();
     this.initializeSession(history);
+    this.warmSession();
 
     this.contextWindowTokens = Math.max(
       1024,
       Number(this.config.store.aiAgent?.contextWindowTokens) ||
         DEFAULT_CONTEXT_WINDOW_TOKENS,
     );
+    this.chatSession?.setContextWindowTokens(this.contextWindowTokens);
     this.refreshContextUsage();
     void this.autodetectContextWindow();
   }
@@ -1326,6 +1466,7 @@ export class AIPanelComponent implements OnInit, AfterViewInit, OnDestroy {
       if (this.config.store.aiAgent) {
         this.config.store.aiAgent.contextWindowTokens = detected;
       }
+      this.chatSession?.setContextWindowTokens(detected);
       this.refreshContextUsage();
     }
   }
@@ -1527,6 +1668,9 @@ export class AIPanelComponent implements OnInit, AfterViewInit, OnDestroy {
   toggleThemeMenu(event?: Event): void {
     event?.stopPropagation();
     this.themeMenuOpen = !this.themeMenuOpen;
+    if (this.themeMenuOpen) {
+      this.searchMenuOpen = false;
+    }
   }
 
   async selectTheme(id: string): Promise<void> {
@@ -1539,17 +1683,47 @@ export class AIPanelComponent implements OnInit, AfterViewInit, OnDestroy {
     await this.config.save();
   }
 
+  // ---------------------------------------------------------------
+  // Выбор поискового движка
+  // ---------------------------------------------------------------
+
+  get webSearchProvider(): string {
+    return normalizeSearchProvider(this.config.store.aiAgent?.webSearchProvider);
+  }
+
+  get currentSearchEngine(): WebSearchEngineInfo {
+    return findWebSearchEngine(this.webSearchProvider);
+  }
+
+  toggleSearchMenu(event?: Event): void {
+    event?.stopPropagation();
+    this.searchMenuOpen = !this.searchMenuOpen;
+    if (this.searchMenuOpen) {
+      this.themeMenuOpen = false;
+    }
+  }
+
+  async selectSearchProvider(id: string): Promise<void> {
+    this.searchMenuOpen = false;
+    this.config.store.aiAgent.webSearchProvider = normalizeSearchProvider(id);
+    await this.config.save();
+  }
+
   onPanelClick(event: MouseEvent): void {
     event.stopPropagation();
     const target = event.target as HTMLElement | null;
     if (!target?.closest?.(".theme-picker")) {
       this.themeMenuOpen = false;
     }
+    if (!target?.closest?.(".search-picker")) {
+      this.searchMenuOpen = false;
+    }
   }
 
   @HostListener("document:click")
   onDocumentClick(): void {
     this.themeMenuOpen = false;
+    this.searchMenuOpen = false;
   }
 
   // ---------------------------------------------------------------
@@ -1892,6 +2066,7 @@ export class AIPanelComponent implements OnInit, AfterViewInit, OnDestroy {
           content: token,
           streaming: true,
           collapsed: role === "reasoning",
+          startedAt: Date.now(),
         },
       ];
       if (!this.userIsNearBottom) {
@@ -1914,13 +2089,23 @@ export class AIPanelComponent implements OnInit, AfterViewInit, OnDestroy {
     }
 
     if (message.role === "assistant") {
-      this.finalizeStreamingMessage(
-        "assistant",
-        this.historyContentToText(message.content),
-        {
-          toolCallIds: message.tool_calls?.map((toolCall) => toolCall.id) ?? [],
-        },
-      );
+      const text = this.historyContentToText(message.content);
+      const rawIds = (message.tool_calls ?? []).map((toolCall) => toolCall.id);
+      const ids = rawIds.map((id) => this.canonicalToolCallId(id));
+      if (ids.length) {
+        if (text.trim()) {
+          // Есть текст и вызовы: показываем текст, а карточки вешаем на него —
+          // это сообщение становится «хостом» шага.
+          this.finalizeStreamingMessage("assistant", text, { toolCallIds: ids });
+          this.toolHostMessageId = this.lastAssistantMessageId();
+        } else {
+          // Только вызовы: без нового пустого блока «Ассистент» — складываем
+          // карточки в хост текущего хода.
+          this.appendToolCallsToHost(ids);
+        }
+        return;
+      }
+      this.finalizeStreamingMessage("assistant", text);
       return;
     }
 
@@ -1933,7 +2118,9 @@ export class AIPanelComponent implements OnInit, AfterViewInit, OnDestroy {
     }
 
     if (message.role === "tool") {
-      const toolCallId = message.tool_call_id ?? null;
+      const toolCallId = message.tool_call_id
+        ? this.canonicalToolCallId(message.tool_call_id)
+        : null;
       if (toolCallId) {
         const existingToolCall = this.toolCalls.find(
           (item) => item.id === toolCallId,
@@ -1959,11 +2146,17 @@ export class AIPanelComponent implements OnInit, AfterViewInit, OnDestroy {
         : this.streamingReasoningMessageId;
 
     if (messageId) {
-      this.messages = this.messages.map((message) =>
-        message.id === messageId
-          ? { ...message, content, streaming: false, ...extra }
-          : message,
-      );
+      const finishedAt = Date.now();
+      this.messages = this.messages.map((message) => {
+        if (message.id !== messageId) {
+          return message;
+        }
+        const durationMs =
+          message.startedAt != null && message.durationMs == null
+            ? finishedAt - message.startedAt
+            : message.durationMs;
+        return { ...message, content, streaming: false, durationMs, ...extra };
+      });
       // The final content may be longer than what was streamed — re-anchor
       // to the bottom after Angular renders it.
       this.scheduleScrollToBottom();
@@ -1998,16 +2191,18 @@ export class AIPanelComponent implements OnInit, AfterViewInit, OnDestroy {
       (item) => item.id === toolCall.id,
     );
     if (existingIndex === -1) {
-      this.toolCalls = [...this.toolCalls, toolCall];
+      this.toolCalls = [...this.toolCalls, this.withToolTiming(toolCall)];
     } else {
       const next = [...this.toolCalls];
-      next[existingIndex] = {
+      next[existingIndex] = this.withToolTiming({
         ...next[existingIndex],
         ...toolCall,
-      };
+      });
       this.toolCalls = next;
     }
 
+    // Спиннер и таймер живут ровно пока выполняется команда.
+    this.syncShellTimer();
     this.scheduleScrollToBottom();
   }
 
@@ -2219,6 +2414,173 @@ export class AIPanelComponent implements OnInit, AfterViewInit, OnDestroy {
         toolCall.name === "run_shell_command" &&
         toolCall.status === "executing",
     );
+  }
+
+  /** Команда реально выполняется (или ждёт ввода) прямо сейчас. */
+  get isShellRunning(): boolean {
+    return this.toolCalls.some(
+      (toolCall) =>
+        toolCall.name === "run_shell_command" &&
+        (toolCall.status === "executing" ||
+          toolCall.status === "awaiting_terminal_input"),
+    );
+  }
+
+  /** Спиннер и таймер — только на время выполнения команды, а не «работы» вообще. */
+  get showRunStatus(): boolean {
+    return this.isShellRunning;
+  }
+
+  get runStatusLabel(): string {
+    return this.toolCalls.some(
+      (toolCall) =>
+        toolCall.name === "run_shell_command" &&
+        toolCall.status === "awaiting_terminal_input",
+    )
+      ? "Ожидание ввода в терминале…"
+      : "Выполняется команда…";
+  }
+
+  /**
+   * Запускает таймер выполнения команды (идемпотентно). Тикает каждые 100 мс,
+   * чтобы отсчёт начинался с миллисекунд и плавно переходил в секунды: 0.85 с →
+   * 6.59 с → 12.3 с → 1 мин 5 с.
+   */
+  private startExecutionTimer(): void {
+    if (this.executionTimer) {
+      return;
+    }
+    this.turnStartedAt = Date.now();
+    this.commandElapsedMs = 0;
+    this.executionTimer = setInterval(() => {
+      this.commandElapsedMs = Date.now() - this.turnStartedAt;
+    }, 100);
+  }
+
+  private stopExecutionTimer(): void {
+    if (this.executionTimer) {
+      clearInterval(this.executionTimer);
+      this.executionTimer = null;
+    }
+    this.commandElapsedMs = 0;
+  }
+
+  /** Таймер идёт ровно пока выполняется команда. */
+  private syncShellTimer(): void {
+    if (this.isShellRunning) {
+      this.startExecutionTimer();
+    } else {
+      this.stopExecutionTimer();
+    }
+  }
+
+  /** Живой отсчёт таймера для строки статуса. */
+  get commandElapsedDisplay(): string {
+    return this.formatDuration(this.commandElapsedMs);
+  }
+
+  /**
+   * Человекочитаемая длительность: 850 мс → 6.59 с → 12.3 с → 1 мин 5 с.
+   * До 1 с — миллисекунды, до 10 с — сотые, до минуты — десятые.
+   */
+  formatDuration(ms: number | null | undefined): string {
+    if (ms == null || !Number.isFinite(ms) || ms < 0) {
+      return "";
+    }
+    if (ms < 1000) {
+      return `${Math.round(ms)} мс`;
+    }
+    const seconds = ms / 1000;
+    if (seconds < 10) {
+      return `${seconds.toFixed(2)} с`;
+    }
+    if (seconds < 60) {
+      return `${seconds.toFixed(1)} с`;
+    }
+    const minutes = Math.floor(seconds / 60);
+    const rest = seconds % 60;
+    const restText = rest < 10 ? rest.toFixed(1) : Math.round(rest).toString();
+    return `${minutes} мин ${restText} с`;
+  }
+
+  /** Проставляет startedAt/durationMs карточке по её статусу. */
+  private withToolTiming(toolCall: ToolCallViewModel): ToolCallViewModel {
+    const terminal =
+      toolCall.status === "completed" ||
+      toolCall.status === "error" ||
+      toolCall.status === "blocked";
+    let startedAt = toolCall.startedAt ?? null;
+    let durationMs = toolCall.durationMs ?? null;
+    if (toolCall.status === "executing" && startedAt == null) {
+      startedAt = Date.now();
+    }
+    if (terminal && startedAt != null && durationMs == null) {
+      durationMs = Date.now() - startedAt;
+    }
+    return { ...toolCall, startedAt, durationMs };
+  }
+
+  /** Канонический id карточки: повторные опросы указывают на первую. */
+  private canonicalToolCallId(id: string | null | undefined): string {
+    if (!id) {
+      return "";
+    }
+    return this.toolCallAlias.get(id) ?? id;
+  }
+
+  private resetTurnGrouping(): void {
+    this.toolHostMessageId = null;
+    this.pollCardId = null;
+    this.toolCallAlias.clear();
+  }
+
+  private lastAssistantMessageId(): string | null {
+    for (let i = this.messages.length - 1; i >= 0; i -= 1) {
+      if (this.messages[i].role === "assistant") {
+        return this.messages[i].id;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Складывает карточки инструментов в одно сообщение-хост текущего хода, чтобы
+   * длинный цикл шагов не плодил пустые блоки «Ассистент» на каждый вызов.
+   */
+  private appendToolCallsToHost(ids: string[]): void {
+    if (!ids.length) {
+      return;
+    }
+    const host = this.toolHostMessageId
+      ? this.messages.find((message) => message.id === this.toolHostMessageId)
+      : undefined;
+    if (host) {
+      this.messages = this.messages.map((message) =>
+        message.id === host.id
+          ? {
+              ...message,
+              toolCallIds: Array.from(
+                new Set([...(message.toolCallIds ?? []), ...ids]),
+              ),
+            }
+          : message,
+      );
+    } else {
+      const id = this.generateId("assistant");
+      this.messages = [
+        ...this.messages,
+        {
+          id,
+          role: "assistant",
+          content: "",
+          streaming: false,
+          toolCallIds: ids,
+          toolOnly: true,
+        },
+      ];
+      this.toolHostMessageId = id;
+    }
+    this.scheduleScrollToBottom();
   }
 
   private isAbortError(error: unknown): boolean {
@@ -2473,7 +2835,10 @@ export class AIPanelComponent implements OnInit, AfterViewInit, OnDestroy {
     }
     this.isCompacting = true;
     try {
-      const result = await this.chatSession.compactHistory();
+      const result = await this.chatSession.compactHistory({
+        contextWindowTokens: this.contextWindowTokens,
+        signal: this.currentAbortController?.signal,
+      });
       this.lastCompactedAt = Date.now();
       this.refreshContextUsage();
       this.addSystemNotice(

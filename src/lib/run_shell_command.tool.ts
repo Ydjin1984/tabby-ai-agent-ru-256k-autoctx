@@ -177,13 +177,13 @@ export class RunShellCommandTool implements Tool {
       // On an alternate screen (nano/vim/htop) the prompt line never appears,
       // so rely on the stability check plus an explicit force-read instead.
       if (!isAlternateScreen && this.detectPromptReturn(output)) {
-        return rawOutput;
+        return this.annotateCommandOutput(rawOutput, "prompt");
       }
 
       // An explicit user force-read means: capture the current output right now
       // and let the agent proceed, instead of insisting on several stable reads.
       if (wasForced && output) {
-        return rawOutput;
+        return this.annotateCommandOutput(rawOutput, "forced");
       }
 
       // Stability check: require several consecutive identical snapshots over a
@@ -198,7 +198,7 @@ export class RunShellCommandTool implements Tool {
           stableRun >= RunShellCommandTool.STABLE_SNAPSHOTS_REQUIRED &&
           Date.now() - stableSince >= RunShellCommandTool.MIN_STABLE_MS
         ) {
-          return rawOutput;
+          return this.annotateCommandOutput(rawOutput, "stable");
         }
       } else {
         stableRun = 0;
@@ -207,7 +207,43 @@ export class RunShellCommandTool implements Tool {
       lastOutput = output;
     }
 
-    return lastOutput || "Вывод терминала не получен.";
+    return this.annotateCommandOutput(lastOutput, "timeout");
+  }
+
+  /**
+   * Одна строка статуса в начале вывода: модель видит, чем кончилась команда,
+   * даже когда в контекст попадает только начало и хвост длинного лога.
+   */
+  private annotateCommandOutput(
+    raw: string,
+    outcome: "prompt" | "stable" | "forced" | "timeout",
+  ): string {
+    const text = raw?.trim() ? raw : "Вывод терминала не получен.";
+    const lines = text
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+    const errorLine = [...lines].reverse().find((line) => {
+      if (/erroraction/i.test(line)) {
+        return false;
+      }
+      return /error|exception|ошибк|не найден|cannot|failed|FullyQualifiedErrorId/i.test(
+        line,
+      );
+    });
+    const status: Record<typeof outcome, string> = {
+      prompt: "Итог: команда завершилась, приглашение оболочки вернулось.",
+      stable:
+        "Итог: вывод перестал меняться; приглашение оболочки могло не вернуться.",
+      forced:
+        "Итог: вывод снят досрочно, команда могла ещё выполняться.",
+      timeout: "Итог: ожидание истекло, команда могла не завершиться.",
+    };
+    const errorNote =
+      errorLine && errorLine.length < 400
+        ? ` Последняя ошибка: ${errorLine}`
+        : "";
+    return `${status[outcome]}${errorNote}\n${text}`;
   }
 
   /**
@@ -274,7 +310,10 @@ export class RunShellCommandTool implements Tool {
       return 700;
     }
 
-    return waitTimeSeconds * 1000;
+    // Модель часто ставит десятки секунд «на всякий случай». Первая пауза нужна
+    // только чтобы приглашение успело смениться; дальше вывод и так опрашивается
+    // до 120 с. Длинная первая пауза просто задерживает ответ.
+    return Math.min(waitTimeSeconds * 1000, 5_000);
   }
 
   private getCommandOutput(

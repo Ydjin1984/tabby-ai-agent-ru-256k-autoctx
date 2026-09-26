@@ -14,8 +14,20 @@ import {
   takeTailByTokens,
 } from "./context_usage";
 import { injectMemoryIntoMessages } from "./request_messages";
-import { stripReasoningParameters, looksRepetitive } from "./request_defaults";
+import {
+  isKibborgEndpoint,
+  looksRepetitive,
+  stripReasoningParameters,
+} from "./request_defaults";
 import { agentLog } from "./debug_log";
+import {
+  applyChatCompletionChunk,
+  assessTurnGuard,
+  createStreamAccumulator,
+  prepareModelMessages,
+  takeCompleteSseLines,
+  TurnGuardInput,
+} from "./chat_stream";
 
 export interface LLMHistoryItem {
   role: "system" | "user" | "assistant" | "tool" | "reasoning";
@@ -94,6 +106,48 @@ export async function checkpointLLMEndpoint(
   }
 }
 
+/**
+ * Key for the anti-loop guard. Covers shell commands and the web tools, which a
+ * misbehaving model otherwise re-issues verbatim when they fail (observed:
+ * repeated `web_search` hitting DuckDuckGo's bot-check, repeated `web_fetch`
+ * on a URL that times out). Returns null for tools where repetition is fine.
+ */
+function repeatGuardKey(toolName: string, args: any): string | null {
+  switch (toolName) {
+    case "run_shell_command":
+      return `cmd:${String(args?.command ?? "").trim()}`;
+    case "web_search":
+      return `search:${String(args?.query ?? "").trim().toLowerCase()}`;
+    case "deep_search":
+      return `deep:${String(args?.query ?? "").trim().toLowerCase()}|${JSON.stringify(
+        args?.sub_queries ?? [],
+      )}`;
+    case "web_fetch":
+      return `fetch:${String(args?.url ?? "").trim()}`;
+    default:
+      return null;
+  }
+}
+
+/**
+ * Counts identical guardable calls within a turn. The first two attempts are
+ * allowed (a retry can be legitimate); from the third identical call on it is
+ * refused so the model cannot loop on a failing action.
+ */
+function isRepeatRefused(
+  history: Map<string, number>,
+  toolName: string,
+  args: any,
+): boolean {
+  const key = repeatGuardKey(toolName, args);
+  if (!key) {
+    return false;
+  }
+  const count = (history.get(key) ?? 0) + 1;
+  history.set(key, count);
+  return count > 2;
+}
+
 export class LLMChatSession {
   private history: LLMHistoryItem[] = [];
   private warmupPromise: Promise<void> | null = null;
@@ -101,12 +155,6 @@ export class LLMChatSession {
   private apiToken: string;
   private model: string;
   private extraParameters: Record<string, any> = {};
-  /**
-   * Set after the model produced reasoning but no answer on the token limit:
-   * the retry runs without reasoning switches so the user gets an answer
-   * instead of an endless "thinking" stream.
-   */
-  private disableReasoning = false;
   toolCalls: { name: string; args: any; output: string }[] = [];
   tools: Tool[];
   toolSchema: any[];
@@ -121,6 +169,8 @@ export class LLMChatSession {
 
   /** Оценка токенов блока памяти, вставленного в последний запрос. */
   private lastMemoryContextTokens = 0;
+  /** Окно, от которого считаются порог сжатия и предохранитель хода. */
+  private contextWindowTokens = DEFAULT_CONTEXT_WINDOW_TOKENS;
 
   constructor(
     baseUrl: string,
@@ -158,6 +208,13 @@ export class LLMChatSession {
    */
   snapshotHistory(): LLMHistoryItem[] {
     return [...this.history];
+  }
+
+  /** Панель передаёт окно, которое пришло из конфига или из /props. */
+  setContextWindowTokens(tokens: number): void {
+    if (Number.isFinite(tokens) && tokens > 0) {
+      this.contextWindowTokens = tokens;
+    }
   }
 
   async chat(options: {
@@ -242,17 +299,86 @@ export class LLMChatSession {
       ? Math.ceil(String(memoryContext).length / 3)
       : 0;
 
+    // How many times the exact same guardable tool call was made this turn.
+    const toolCallHistory = new Map<string, number>();
+    // Только этот ход. Следующее сообщение снова уважает уровень размышлений
+    // из настроек; иначе один пустой ответ выключал thinking до конца сессии.
+    let suppressReasoning = false;
+    const turnStarted = Date.now();
+    let toolCallsThisTurn = 0;
+    let compactionsThisTurn = 0;
+    let lastCompactGain: number | null = null;
+    let warnedToolVolume = false;
+    let lastContent = "";
     while (true) {
       this.throwIfAborted(options.signal);
-      const effectiveParams = this.disableReasoning
+      const guard = this.turnGuardDecision(
+        turnStarted,
+        toolCallsThisTurn,
+        compactionsThisTurn,
+        lastCompactGain,
+      );
+      if (guard.warning && !warnedToolVolume) {
+        warnedToolVolume = true;
+        await options.onNotice?.(guard.warning);
+      }
+      if (guard.stop) {
+        await options.onNotice?.(guard.stop);
+        await pushHistory({ role: "assistant", content: guard.stop });
+        await this.observeMemory(() => this.memory!.finishTurn());
+        return lastContent || guard.stop;
+      }
+      if (guard.compact) {
+        const before = this.getEstimatedContextTokens();
+        try {
+          const compacted = await this.compactHistory({
+            contextWindowTokens: this.contextWindowTokens,
+            signal: options.signal,
+          });
+          compactionsThisTurn += 1;
+          lastCompactGain =
+            before > 0 ? (before - compacted.afterTokens) / before : 0;
+          await options.onNotice?.(
+            `Контекст сжат по ходу задачи: ${before} → ${compacted.afterTokens} токенов.`,
+          );
+        } catch (error) {
+          if (this.isAbortError(error)) {
+            throw error;
+          }
+          await options.onNotice?.(
+            "Сжать контекст не удалось — останавливаю ход, чтобы запрос не упёрся в окно.",
+          );
+          await this.observeMemory(() => this.memory!.finishTurn());
+          return lastContent;
+        }
+        continue;
+      }
+      const effectiveParams = suppressReasoning
         ? stripReasoningParameters(this.extraParameters)
         : this.extraParameters;
       const requestMessages = this.buildRequestMessages(memoryContext);
+      const lastUser = [...requestMessages].reverse().find((item) => item.role === "user");
+      let userChars = 0;
+      let imageParts = 0;
+      if (typeof lastUser?.content === "string") {
+        userChars = lastUser.content.length;
+      } else if (Array.isArray(lastUser?.content)) {
+        for (const part of lastUser?.content ?? []) {
+          if (part?.type === "text") {
+            userChars += String(part.text ?? "").length;
+          }
+          if (part?.type === "image_url") {
+            imageParts += 1;
+          }
+        }
+      }
       agentLog("request", {
         model: this.model,
         endpoint: this.baseUrl,
-        disableReasoning: this.disableReasoning,
+        disableReasoning: suppressReasoning,
         messages: requestMessages.length,
+        userChars,
+        imageParts,
         tools: this.tools?.map((tool) => tool.name()),
         params: effectiveParams,
       });
@@ -261,11 +387,14 @@ export class LLMChatSession {
         headers: buildRequestHeaders(this.apiToken),
         signal: options.signal,
         body: JSON.stringify({
+          // Параметры пользователя (температура, штрафы, max_tokens) идут первыми.
+          // Служебные поля после них, чтобы JSON-бокс не мог выключить поток,
+          // подменить сообщения или снять схему инструментов.
+          ...effectiveParams,
           model: this.model,
           messages: requestMessages,
           stream: true,
           tools: this.toolSchema,
-          ...effectiveParams,
         }),
       });
       if (!response.ok) {
@@ -273,13 +402,14 @@ export class LLMChatSession {
         agentLog("api_error", { status: response.status, statusText: response.statusText });
         throw new Error(`API error: ${response.status} ${response.statusText}`);
       }
-      const reader = response.body!.getReader();
+      if (!response.body) {
+        throw new Error("API error: пустое тело потока");
+      }
+      const reader = response.body.getReader();
       const decoder = new TextDecoder();
-      let fullContent = "";
-      let fullReasoning = "";
-      const requestedToolCalls: Record<number, ToolCallAccumulator> = {};
-      let finishReason: "tool_calls" | "stop" | "length" | null = null;
+      const stream = createStreamAccumulator();
       let lastStdoutWasReasoning = false;
+      let stopNotified = false;
       let sseBuffer = "";
       while (true) {
         this.throwIfAborted(options.signal);
@@ -289,97 +419,62 @@ export class LLMChatSession {
         } else {
           sseBuffer += decoder.decode(value, { stream: true });
         }
-        // Сетевой чанк может разрезать SSE-фрейм внутри JSON, поэтому незавершённая
-        // строка остаётся в буфере до следующего чанка: раньше обрезанный фрейм
-        // молча терялся вместе с именем инструмента (Unknown tool requested: unknown).
-        const bufferedLines = sseBuffer.split("\n");
-        sseBuffer = done ? "" : (bufferedLines.pop() ?? "");
-        const lines = bufferedLines.filter((l) => l.startsWith("data: "));
+        const taken = takeCompleteSseLines(sseBuffer, done);
+        sseBuffer = taken.rest;
+        const lines = taken.lines.filter((l) => l.startsWith("data: "));
         for (const line of lines) {
-          const data = line.slice(6);
-          if (data === "[DONE]") continue;
+          const data = line.slice(6).trim();
+          if (!data || data === "[DONE]") continue;
+          let parsed: any;
           try {
-            const parsed = JSON.parse(data);
-            const usage = parsed.usage;
-            if (
-              usage &&
-              typeof usage.prompt_tokens === "number" &&
-              Number.isFinite(usage.prompt_tokens)
-            ) {
-              this.lastReportedPromptTokens = usage.prompt_tokens;
-            }
-            const choice = parsed.choices?.[0];
-            if (!choice) continue;
-            if (choice.finish_reason) {
-              const timing: LlamaCppTimings = parsed.timings;
-              finishReason = choice.finish_reason;
-              if (options.onStopReason) {
-                await options.onStopReason(choice.finish_reason, timing);
-              }
-              break;
-            }
-            const delta = choice.delta;
-            if (!delta) continue;
-            if (delta.tool_calls) {
-              for (const tc of delta.tool_calls) {
-                const i: any =
-                  tc.index !== undefined && tc.index !== null
-                    ? tc.index
-                    : `call:${tc.id ?? Object.keys(requestedToolCalls).length}`;
-                if (!requestedToolCalls[i]) {
-                  requestedToolCalls[i] = {
-                    id: tc.id,
-                    type: "function",
-                    function: { name: tc.function?.name ?? "", arguments: "" },
-                  };
-                } else {
-                  // id и name провайдер вправе прислать в любом чанке, а не только в
-                  // первом: без этого одна потерянная граница фрейма оставляла вызов
-                  // без имени и он падал как «Unknown tool requested: unknown».
-                  if (!requestedToolCalls[i].id && tc.id) {
-                    requestedToolCalls[i].id = tc.id;
-                  }
-                  const deltaName = tc.function?.name;
-                  if (!requestedToolCalls[i].function.name && deltaName) {
-                    requestedToolCalls[i].function.name = deltaName;
-                  }
-                }
-                if (tc.function?.arguments) {
-                  requestedToolCalls[i].function.arguments +=
-                    tc.function.arguments;
-                }
-              }
-            }
-            if (delta.reasoning) {
-              throw new Error("different format");
-            }
-            if (delta.reasoning_content) {
-              fullReasoning += delta.reasoning_content;
-              if (!options.silent) {
-                process.stdout.write(delta.reasoning_content);
-                lastStdoutWasReasoning = true;
-              }
-              if (options.onReasoningToken) {
-                await options.onReasoningToken(delta.reasoning_content);
-              }
-            } else if (delta.content) {
-              fullContent += delta.content;
-              if (!options.silent) {
-                if (lastStdoutWasReasoning) {
-                  process.stdout.write("\n");
-                  lastStdoutWasReasoning = false;
-                }
-                process.stdout.write(delta.content);
-              }
-              if (options.onToken) await options.onToken(delta.content);
-            }
+            parsed = JSON.parse(data);
           } catch {
             console.warn("Failed to parse chunk:", data);
-            // skip malformed chunks
+            continue;
+          }
+          const contentBefore = stream.content.length;
+          const reasoningBefore = stream.reasoning.length;
+          applyChatCompletionChunk(stream, parsed);
+          if (stream.promptTokens !== null) {
+            this.lastReportedPromptTokens = stream.promptTokens;
+          }
+          const reasoningDelta = stream.reasoning.slice(reasoningBefore);
+          if (reasoningDelta) {
+            if (!options.silent) {
+              process.stdout.write(reasoningDelta);
+              lastStdoutWasReasoning = true;
+            }
+            if (options.onReasoningToken) {
+              await options.onReasoningToken(reasoningDelta);
+            }
+          }
+          const contentDelta = stream.content.slice(contentBefore);
+          if (contentDelta) {
+            if (!options.silent) {
+              if (lastStdoutWasReasoning) {
+                process.stdout.write("\n");
+                lastStdoutWasReasoning = false;
+              }
+              process.stdout.write(contentDelta);
+            }
+            if (options.onToken) await options.onToken(contentDelta);
+          }
+          if (stream.finishReason && !stopNotified && options.onStopReason) {
+            stopNotified = true;
+            const timing: LlamaCppTimings = parsed.timings;
+            await options.onStopReason(
+              stream.finishReason as "tool_calls" | "stop",
+              timing,
+            );
           }
         }
         if (done) break;
       }
+      const fullContent = stream.content;
+      lastContent = fullContent;
+      const fullReasoning = stream.reasoning;
+      const finishReason = stream.finishReason;
+      const requestedToolCalls = stream.toolCalls;
 
       agentLog("finish", {
         reason: finishReason,
@@ -401,7 +496,8 @@ export class LLMChatSession {
       // commands (the user saw a long text answer and nothing ran).
       if (
         finishReason === "tool_calls" ||
-        (finishReason === "length" && assistantToolCalls.length > 0)
+        (assistantToolCalls.length > 0 &&
+          (finishReason === "length" || finishReason === null))
       ) {
         // Snapshot history length before pushing the assistant tool_calls message.
         // If we are aborted mid-tool-execution, we must roll back to keep the
@@ -425,13 +521,15 @@ export class LLMChatSession {
             tc.id = crypto.randomUUID();
           }
         }
+        toolCallsThisTurn += assistantToolCalls.length;
         await pushHistory({
           role: "assistant",
           content: fullContent.trim() ? fullContent : null,
           tool_calls: assistantToolCalls,
         });
         try {
-          for (const tc of assistantToolCalls) {
+          for (let toolIndex = 0; toolIndex < assistantToolCalls.length; toolIndex++) {
+          const tc = assistantToolCalls[toolIndex];
           if (!this.tools) continue;
           const toolCallId = tc.id;
           const requestedName = tc.function?.name || "";
@@ -501,6 +599,13 @@ export class LLMChatSession {
           }
           if (!allow) {
             toolOutput = `Tool ${toolName} call was not allowed because the user declined it. Current response stopped.`;
+            stopAfterToolResult = true;
+          } else if (isRepeatRefused(toolCallHistory, toolName, args)) {
+            // The model was stuck re-sending an identical failing command; refuse
+            // the repetition and STOP the turn, otherwise it loops on the refusal
+            // forever (no step limit by design).
+            toolOutput =
+              `Повтор вызова ${toolName} отменён: он уже выполнялся несколько раз без изменений и результата. Не повторяй его — измени запрос/команду или разберись с причиной ошибки.`;
             stopAfterToolResult = true;
           } else {
             try {
@@ -591,8 +696,36 @@ export class LLMChatSession {
             tool_call_id: toolCallId,
           });
           if (stopAfterToolResult) {
+            // У assistant-сообщения должен быть ответ на КАЖДЫЙ tool_call.
+            // Иначе следующий запрос провайдер отвергает с HTTP 400 и сессия умирает.
+            const skipped =
+              "Вызов не выполнен: ход остановлен после отказа или повтора. Не повторяй его вслепую.";
+            for (
+              let pendingIndex = toolIndex + 1;
+              pendingIndex < assistantToolCalls.length;
+              pendingIndex++
+            ) {
+              const pending = assistantToolCalls[pendingIndex];
+              await pushHistory({
+                role: "tool",
+                content: skipped,
+                tool_call_id: pending.id,
+              });
+              if (options.onToolResult) {
+                await options.onToolResult(
+                  pending.id,
+                  pending.function?.name || "unknown",
+                  {},
+                  skipped,
+                );
+              }
+            }
+            const closing = allow
+              ? "Останавливаюсь: это действие уже повторялось и не дало нового результата. Напишите, что сделать дальше, или дайте точный адрес страницы."
+              : "Останавливаюсь: команда отклонена.";
+            await pushHistory({ role: "assistant", content: closing });
             await this.observeMemory(() => this.memory!.finishTurn());
-            return fullContent;
+            return closing;
           }
         }
         } catch (error) {
@@ -604,7 +737,10 @@ export class LLMChatSession {
           throw error;
         }
         continue;
-      } else if (finishReason === "stop") {
+      } else if (
+        finishReason === "stop" ||
+        (finishReason === null && fullContent.trim())
+      ) {
         // Normal completion
         await pushHistory({ role: "assistant", content: fullContent.trim() });
         await this.observeMemory(() =>
@@ -636,8 +772,8 @@ export class LLMChatSession {
         // when the model spends the whole budget on reasoning (and, with a long
         // task, loops): retry once without reasoning switches instead of
         // throwing or handing the user a wall of repeated text.
-        if ((fullReasoning.trim() || truncated) && !this.disableReasoning) {
-          this.disableReasoning = true;
+        if ((fullReasoning.trim() || truncated) && !suppressReasoning) {
+          suppressReasoning = true;
           agentLog("length_retry", {
             reason: looped ? "looped" : "empty_after_reasoning",
             reasoningLen: fullReasoning.length,
@@ -656,32 +792,36 @@ export class LLMChatSession {
             "Проверьте max_tokens и thinking_budget_tokens в дополнительных параметрах плагина.",
         );
       } else {
-        throw new Error("Неизвестная причина завершения: " + finishReason);
+        throw new Error(
+          finishReason
+            ? "Неизвестная причина завершения: " + finishReason
+            : "Поток ответа оборвался до причины завершения и не содержал текста. Повторите запрос.",
+        );
       }
     }
   }
 
   async warmup(): Promise<void> {
+    if (!isKibborgEndpoint(this.baseUrl)) {
+      return;
+    }
     if (this.warmupPromise) {
       return this.warmupPromise;
     }
 
     this.warmupPromise = (async () => {
-      const warmupMessages: LLMHistoryItem[] = [
-        ...this.history,
-        {
-          role: "user",
-          content: "Прогрей кэш сессии для следующего реального сообщения пользователя.",
-        },
-      ];
-
+      // Тот же префикс, что у рабочего запроса: системный промпт, инструменты
+      // и параметры сэмплинга. Иначе llama.cpp не переиспользует кэш.
       const response = await fetch(buildChatCompletionsUrl(this.baseUrl), {
         method: "POST",
         headers: buildRequestHeaders(this.apiToken),
         body: JSON.stringify({
+          ...this.extraParameters,
           model: this.model,
-          messages: warmupMessages,
+          messages: prepareModelMessages(this.history),
+          tools: this.toolSchema,
           stream: false,
+          max_tokens: 1,
           n_predict: 0,
           cache_prompt: true,
         }),
@@ -713,7 +853,7 @@ export class LLMChatSession {
    */
   getEstimatedContextTokens(): number {
     return (
-      estimateHistoryTokens(this.history) +
+      estimateHistoryTokens(prepareModelMessages(this.history)) +
       estimateToolSchemaTokens(this.toolSchema) +
       this.lastMemoryContextTokens
     );
@@ -727,9 +867,12 @@ export class LLMChatSession {
   getContextTokensForDisplay(): { tokens: number; exact: boolean } {
     const estimate = this.getEstimatedContextTokens();
     if (this.lastReportedPromptTokens !== null) {
+      const tokens = Math.max(this.lastReportedPromptTokens, estimate);
       return {
-        tokens: Math.max(this.lastReportedPromptTokens, estimate),
-        exact: true,
+        tokens,
+        // Серверная цифра точная только когда она не меньше нашей оценки.
+        // Иначе метр опирается на эвристику (устаревший usage или недосчёт).
+        exact: tokens === this.lastReportedPromptTokens,
       };
     }
     return { tokens: estimate, exact: false };
@@ -743,6 +886,8 @@ export class LLMChatSession {
   async compactHistory(options?: {
     maxSummaryTokens?: number;
     signal?: AbortSignal;
+    /** Реальное окно эндпоинта. Без него сжатие считает, что окно всегда 256K. */
+    contextWindowTokens?: number;
   }): Promise<{
     summary: string;
     beforeTokens: number;
@@ -762,7 +907,10 @@ export class LLMChatSession {
     const rest = fullHistory.filter((h) => h.role !== "system");
 
     const beforeTokens = this.getEstimatedContextTokens();
-    const windowTokens = DEFAULT_CONTEXT_WINDOW_TOKENS;
+    const windowTokens =
+      options?.contextWindowTokens && options.contextWindowTokens > 0
+        ? options.contextWindowTokens
+        : this.contextWindowTokens;
 
     // The compaction request must comfortably fit the context window together
     // with the summarizer prompt and the completion. Our heuristic token
@@ -805,12 +953,15 @@ export class LLMChatSession {
       headers: buildRequestHeaders(this.apiToken),
       signal: options?.signal,
       body: JSON.stringify({
+        // Размышления на сжатии съедают бюджет и возвращают пустой content.
+        // max_tokens/temperature/stream фиксируются после пользовательских
+        // параметров: иначе дефолт max_tokens 16384 затирал лимит резюме.
+        ...stripReasoningParameters(this.extraParameters),
         model: this.model,
         messages: summaryRequest,
         stream: false,
         max_tokens: maxSummaryTokens,
         temperature: 0.2,
-        ...this.extraParameters,
       }),
     });
     if (!response.ok) {
@@ -820,8 +971,10 @@ export class LLMChatSession {
       );
     }
     const data = await response.json();
-    const summary = String(data?.choices?.[0]?.message?.content ?? "")
-      .trim();
+    const summaryMessage = data?.choices?.[0]?.message ?? {};
+    const summary = String(
+      summaryMessage.content ?? summaryMessage.reasoning_content ?? "",
+    ).trim();
     if (!summary) {
       throw new Error("Сжатие вернуло пустое резюме.");
     }
@@ -847,6 +1000,26 @@ export class LLMChatSession {
     };
   }
 
+  private turnGuardDecision(
+    turnStarted: number,
+    toolCalls: number,
+    compactions: number,
+    lastGain: number | null,
+  ): ReturnType<typeof assessTurnGuard> {
+    const usageRatio =
+      this.contextWindowTokens > 0
+        ? this.getEstimatedContextTokens() / this.contextWindowTokens
+        : 0;
+    const input: TurnGuardInput = {
+      elapsedMs: Date.now() - turnStarted,
+      toolCalls,
+      usageRatio,
+      compactions,
+      lastGain,
+    };
+    return assessTurnGuard(input);
+  }
+
   private throwIfAborted(signal?: AbortSignal): void {
     if (signal?.aborted) {
       throw new DOMException("Operation was aborted.", "AbortError");
@@ -860,8 +1033,10 @@ export class LLMChatSession {
    * and keeping the system prompt untouched preserves prompt caching.
    */
   private buildRequestMessages(memoryContext: string | null): LLMHistoryItem[] {
-    const messages = this.history.filter((item) => item.role !== "reasoning");
-    return injectMemoryIntoMessages(messages, memoryContext);
+    return injectMemoryIntoMessages(
+      prepareModelMessages(this.history),
+      memoryContext,
+    );
   }
 
   private async buildMemoryContext(userMessage: string): Promise<string | null> {

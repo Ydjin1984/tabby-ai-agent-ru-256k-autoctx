@@ -1901,3 +1901,109 @@
     }
 }
 
+
+/* --- Строка статуса выполнения (спиннер + время) --- */
+.run-status {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 8px 15px;
+    border-top: 1px solid var(--ap-line, var(--theme-border));
+    background: var(--ap-bg1, var(--theme-bg-more));
+    color: var(--ap-fg-dim, var(--theme-fg-muted));
+    font-size: 12px;
+    flex: none;
+}
+
+.run-status-label {
+    font-weight: 600;
+    color: var(--ap-fg, var(--theme-fg));
+}
+
+.run-status-time {
+    font-family: var(--monospace-font);
+    font-variant-numeric: tabular-nums;
+    font-weight: 700;
+    color: var(--ap-accent, var(--theme-primary));
+}
+
+.run-status-hint {
+    margin-left: auto;
+    font-size: 11px;
+    opacity: 0.7;
+    white-space: nowrap;
+}
+
+.run-spinner {
+    width: 13px;
+    height: 13px;
+    flex: none;
+    border-radius: 50%;
+    border: 2px solid var(--ap-line2, var(--theme-border));
+    border-top-color: var(--ap-accent, var(--theme-primary));
+    animation: ap-spin 0.8s linear infinite;
+}
+
+@keyframes ap-spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .run-spinner {
+        animation-duration: 3s;
+    }
+}
+
+/* Хост карточек инструментов: без пустого заголовка «Ассистент». */
+.messages .message.tool-only {
+    padding-top: 6px;
+    padding-bottom: 6px;
+}
+
+.messages .message.tool-only .message-header {
+    display: none;
+}
+
+/* --- Время выполнения у действий --- */
+.messages .message-header .msg-duration {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 10.5px;
+    color: var(--ap-fg-dim, var(--theme-fg-muted));
+
+    i {
+        font-size: 10px;
+    }
+}
+
+.messages .message-content .tool-calls .tool-call-card .tool-call-header {
+    justify-content: flex-start;
+    gap: 8px;
+}
+
+.messages .message-content .tool-calls .tool-call-card .tool-status {
+    margin-left: auto;
+}
+
+.messages .message-content .tool-calls .tool-call-card .tool-duration {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: none;
+    letter-spacing: 0;
+    color: var(--ap-fg-dim, var(--theme-fg-muted));
+
+    i {
+        font-size: 10px;
+    }
+}
+
+.search-picker {
+    position: relative;
+    display: inline-flex;
+}

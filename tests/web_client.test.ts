@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {
+  decodeBingUrl,
   decodeDuckDuckGoUrl,
   decodeHtmlEntities,
   extractTitle,
@@ -7,7 +8,10 @@ import {
   htmlToText,
   isSafePublicUrl,
   normalizeHttpUrl,
+  parseBingResults,
+  parseBraveResults,
   parseDuckDuckGo,
+  parseMwmbl,
   stripHtml,
 } from "../src/lib/web_client";
 
@@ -118,5 +122,71 @@ assert.match(formatted, /tabby/);
 assert.match(formatted, /1\. Tabby/);
 assert.match(formatted, /URL: https:\/\/tabby\.sh\//);
 assert.match(formatted, /Terminal app\./);
+
+// --- Brave Search parsing (fallback engine) --------------------------------
+
+const braveHtml = `
+<div class="snippet" data-type="web">
+  <a href="https://example.com/a" class="s l1">
+    <cite class="snippet-url">example.com<span> &gt; a</span></cite>
+    <div class="title search-snippet-title line-clamp-1" title="Example Title A">Example Title A</div>
+  </a>
+  <div class="generic-snippet"><div class="content">Some description A.</div></div>
+</div>
+<div class="snippet" data-type="web">
+  <a href="https://example.org/b" class="s l1">
+    <div class="title search-snippet-title" title="Example Title B">Example Title B</div>
+  </a>
+  <div class="generic-snippet"><div class="content">Some description B.</div></div>
+</div>`;
+
+const brave = parseBraveResults(braveHtml, 10);
+assert.equal(brave.length, 2);
+assert.deepEqual(brave[0], {
+  title: "Example Title A",
+  url: "https://example.com/a",
+  snippet: "Some description A.",
+});
+assert.equal(brave[1].url, "https://example.org/b");
+assert.match(brave[1].snippet, /description B/);
+
+const nodeUrl = "https://nodejs.org/";
+const bingToken = Buffer.from(nodeUrl).toString("base64");
+assert.equal(
+  decodeBingUrl(`https://www.bing.com/ck/a?&u=a1${bingToken}&ntb=1`),
+  nodeUrl,
+);
+
+const bingHtml = `
+<li class="b_algo">
+  <h2><a href="https://www.bing.com/ck/a?&amp;u=a1${bingToken}&amp;ntb=1">Node.js</a></h2>
+  <p class="b_lineclamp2">JavaScript runtime.</p>
+</li>`;
+const bing = parseBingResults(bingHtml, 5);
+assert.equal(bing.length, 1);
+assert.equal(bing[0].url, nodeUrl);
+assert.equal(bing[0].title, "Node.js");
+assert.match(bing[0].snippet, /JavaScript runtime/);
+assert.equal(
+  parseBingResults(`<h1>There are no results for <strong>x</strong></h1><li class="b_algo"><h2><a href="https://example.com">X</a></h2></li>`, 5).length,
+  0,
+);
+
+const mwmbl = parseMwmbl(
+  JSON.stringify([
+    {
+      url: "https://nodejs.org/en",
+      title: [{ value: "Node.js" }, { value: " LTS" }],
+      extract: [{ value: "Current release." }],
+    },
+    { url: "http://127.0.0.1/secret", title: "local", extract: "no" },
+    { url: "https://nodejs.org/en", title: "duplicate", extract: "dup" },
+  ]),
+  10,
+);
+assert.equal(mwmbl.length, 1);
+assert.equal(mwmbl[0].url, "https://nodejs.org/en");
+assert.equal(mwmbl[0].title, "Node.js LTS");
+assert.equal(mwmbl[0].snippet, "Current release.");
 
 console.log("web_client tests passed");
